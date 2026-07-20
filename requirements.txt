@@ -1,0 +1,7 @@
+matplotlib
+numpy<2
+pandas
+Pillow
+scipy
+skyfield
+git+https://github.com/esa/tetra3.git

@@ -18,7 +18,7 @@ RENDER_COLORS = {
     "Pluto": (255, 192, 203),
 }
 
-def render(sky: Sky, observer: Observer, camera: Camera):
+def render(sky: Sky, observer: Observer, camera: Camera, noise_seed=None):
     stars_info, stars_ned = sky.get_stars_ned(observer)
     bodies_info, bodies_ned = sky.get_bodies_ned(observer)
     matrix = observer.observer_matrix.T @ camera.camera_matrix.T
@@ -59,7 +59,14 @@ def render(sky: Sky, observer: Observer, camera: Camera):
         distance = np.linalg.norm(vector)
         angular_radius = np.arcsin(np.clip(info.radius_km / distance, 0, 1))
         radius_px = camera.focal_length * np.tan(angular_radius)
-        color = RENDER_COLORS.get(info.name, (255, 255, 255)) if camera.monochromatic else (255, 255, 255)
+        color = (
+            (255, 255, 255)
+            if camera.monochromatic
+            else RENDER_COLORS.get(info.name, (255, 255, 255))
+        )
         canvas.draw(point, info.apparent_magnitude, radius_px, color)
+
+    canvas.add_horizon(observer.observer_matrix)
+    canvas.add_noise(noise_seed)
 
     return canvas

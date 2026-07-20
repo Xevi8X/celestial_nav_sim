@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
 @dataclass
 class Camera:
@@ -10,6 +11,11 @@ class Camera:
     exposure_time: float = 0.1
     flux: float = 3e5
     fwhm: float = 5.0
+
+    sky_background_e: float = 1.0
+    ground_background_e: float = 20.0
+    horizon_blur_px: float = 10.0
+    read_noise_e: float = 5.0
     
     monochromatic: bool = True
 
@@ -20,6 +26,16 @@ class Camera:
             raise ValueError("width and height must be positive")
         if self.fwhm <= 0:
             raise ValueError("fwhm must be positive")
+        if self.exposure_time <= 0:
+            raise ValueError("exposure_time must be positive")
+        if self.flux <= 0:
+            raise ValueError("flux must be positive")
+        if self.sky_background_e < 0 or self.ground_background_e < 0:
+            raise ValueError("background levels must be non-negative")
+        if self.horizon_blur_px < 0:
+            raise ValueError("horizon_blur_px must be non-negative")
+        if self.read_noise_e < 0:
+            raise ValueError("read_noise_e must be non-negative")
 
     @property
     def focal_length(self):
@@ -34,3 +50,23 @@ class Camera:
             [0, 0, 1],
         ])
         return intrinsics
+
+    def horizon_fractions(self, observer_matrix):
+        observer_matrix = np.asarray(observer_matrix, dtype=np.float64)
+        if observer_matrix.shape != (3, 3):
+            raise ValueError("observer_matrix must have shape (3, 3)")
+
+        yy, xx = np.indices((self.height, self.width), dtype=np.float64)
+        pixels = np.stack((xx, yy, np.ones_like(xx)), axis=-1)
+        rays_camera = pixels @ np.linalg.inv(self.camera_matrix).T
+        rays_ned = rays_camera @ observer_matrix
+
+        ground = (rays_ned[:, :, 2] > 0).astype(np.float32)
+        if self.horizon_blur_px > 0:
+            ground = gaussian_filter(
+                ground,
+                sigma=self.horizon_blur_px,
+                mode="nearest",
+            )
+        ground = np.clip(ground, 0, 1)
+        return 1 - ground, ground

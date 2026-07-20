@@ -4,3 +4,4 @@ class Config:
     CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache"
     EPHEMERIS = "de440s.bsp"
     FLOAT_TOL = 1e-6
+    MAX_NAVIGATION_ITERATIONS = 10

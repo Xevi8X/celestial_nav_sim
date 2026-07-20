@@ -7,14 +7,8 @@ class Canvas:
     def __init__(self, camera : Camera):
         self._camera = camera
         self._image = np.zeros((camera.height, camera.width, 3), dtype=np.float32)
-        self._output = None
-        self._horizon_added = False
 
     def draw(self, position, magnitude, radius_px=0.0, color=(255, 255, 255)):
-        if self._output is not None:
-            raise ValueError("Canvas already finalized")
-        if self._horizon_added:
-            raise ValueError("Cannot draw after adding the horizon")
         x, y = position
         if not np.isfinite([x, y, magnitude, radius_px]).all() or radius_px < 0:
             return
@@ -41,11 +35,6 @@ class Canvas:
         self._image[y0:y1, x0:x1] += signal * kernel[:, :, None] * (np.asarray(color) / 255)
 
     def add_horizon(self, observer_matrix):
-        if self._output is not None:
-            raise ValueError("Canvas already finalized")
-        if self._horizon_added:
-            raise ValueError("Horizon already added")
-
         sky, ground = self._camera.horizon_fractions(observer_matrix)
         self._image *= sky[:, :, None]
         background_e = (
@@ -53,12 +42,8 @@ class Canvas:
             + self._camera.ground_background_e * ground
         )
         self._image += background_e[:, :, None]
-        self._horizon_added = True
 
     def add_noise(self, seed=None):
-        if self._output is not None:
-            raise ValueError("Noise already added")
-
         rng = np.random.default_rng(seed)
 
         if self._camera.monochromatic:
@@ -72,12 +57,11 @@ class Canvas:
             self._camera.read_noise_e,
             measured_e.shape,
         ).astype(np.float32)
-        self._output = np.rint(np.clip(measured_e, 0, 255)).astype(np.uint8)
+        self._image = np.rint(np.clip(measured_e, 0, 255)).astype(np.uint8)
 
     def image(self):
-        if self._output is None:
-            raise ValueError("Canvas not finalized. Call add_noise() first")
-        return Image.fromarray(self._output)
+        mode = "L" if self._camera.monochromatic else "RGB"
+        return Image.fromarray(self._image, mode=mode)
 
     def save(self, filename):
         self.image().save(filename)

@@ -6,9 +6,7 @@ from skyfield.api import Loader, Star, wgs84
 from skyfield.data import hipparcos
 from skyfield.framelib import itrs
 
-from common import Config
-from common import Observer
-from common import Rotation
+from common import Config, ECEF, Observer
 
 # https://doi.org/10.1016/j.ascom.2018.08.002
 DEFAULT_BODIES = (
@@ -54,19 +52,59 @@ class Sky:
         self._stars_info = [Sky.StarInfo(int(i), float(row["magnitude"])) for i, row in frame.iterrows()]
         self._stars = Star.from_dataframe(frame)
 
-    def to_ecef(self, observer : Observer, objects):
-        observer_pos = self._earth + wgs84.latlon(observer.latitude, observer.longitude, observer.elevation)
-        observer_in_spacetime = observer_pos.at(self._timescale.from_datetime(observer.time))
-        if isinstance(objects, list):
-            return np.array([observer_in_spacetime.observe(obj).apparent().frame_xyz(itrs).km for obj in objects])
-        return np.asarray(observer_in_spacetime.observe(objects).apparent().frame_xyz(itrs).km).T
+    def _get_observer_spacetime(self, observer: Observer):
+        observer_location = wgs84.latlon(observer.latitude, observer.longitude, elevation_m=observer.elevation)
+        return (self._earth + observer_location).at(self._timescale.from_datetime(observer.time))
 
-    def ecef_to_ned(self, observer : Observer, vectors):
-        lat, lon = np.radians([observer.latitude, observer.longitude])
-        return vectors @ Rotation.Z(-lon).T @ Rotation.Y(np.pi / 2 + lat).T
+    def _get_vector_to_object(self, observer: Observer, obj):
+        observer_spacetime = self._get_observer_spacetime(observer)
+        apparent = observer_spacetime.observe(obj).apparent()
+        alt, az, distance = apparent.altaz('standard')
+
+        alt = alt.radians
+        az = az.radians
+
+        ned = np.array([
+            np.cos(alt) * np.cos(az),
+            np.cos(alt) * np.sin(az),
+            -np.sin(alt)
+        ])
+
+        ecef_to_ned = ECEF.ecef_to_ned(observer.latitude, observer.longitude)
+        return ecef_to_ned.T @ ned * distance.km
+
+    def objects_to_ecef(self, observer : Observer, objects):
+        if isinstance(objects, list):
+            return np.array([self._get_vector_to_object(observer, obj) for obj in objects])
+        return np.asarray(self._get_vector_to_object(observer, objects)).T
     
-    def get_stars_ned(self, observer : Observer) -> tuple[list[StarInfo], np.ndarray]:
-        return self._stars_info, self.ecef_to_ned(observer, self.to_ecef(observer, self._stars))
+    def radec_to_ecef(self, observer, ra, dec, roll = 0.0):
+        ra, dec, roll = np.radians([ra, dec, roll])
+
+        east = np.array([-np.sin(ra), np.cos(ra), 0.0])
+        north = np.array([
+            -np.sin(dec) * np.cos(ra),
+            -np.sin(dec) * np.sin(ra),
+            np.cos(dec)
+        ])
+        up_icrs = -np.sin(roll) * east + np.cos(roll) * north
+
+        star = Star(
+            ra_hours=np.degrees(ra) / 15.0,
+            dec_degrees=np.degrees(dec)
+        )
+
+        direction = self._get_vector_to_object(observer, star)
+        direction /= np.linalg.norm(direction)
+
+        up = itrs.rotation_at(self._timescale.from_datetime(observer.time)) @ up_icrs
+        up -= direction * np.dot(direction, up)
+        up /= np.linalg.norm(up)
+
+        return direction, up
+
+    def get_stars_ecef(self, observer : Observer) -> tuple[list[StarInfo], np.ndarray]:
+        return self._stars_info, self.objects_to_ecef(observer, self._stars)
     
-    def get_bodies_ned(self, observer : Observer) -> tuple[list[BodyInfo], np.ndarray]:
-        return self._bodies_info, self.ecef_to_ned(observer, self.to_ecef(observer, self._bodies))
+    def get_bodies_ecef(self, observer : Observer) -> tuple[list[BodyInfo], np.ndarray]:
+        return self._bodies_info, self.objects_to_ecef(observer, self._bodies)

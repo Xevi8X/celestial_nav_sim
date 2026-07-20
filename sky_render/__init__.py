@@ -1,4 +1,4 @@
 from .camera import Camera
-from .render import render
+from .render import Renderer
 
-__all__ = ["Camera", "render"]
+__all__ = ["Camera", "Renderer"]

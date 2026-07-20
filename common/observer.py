@@ -10,9 +10,12 @@ class Observer:
         self.time : datetime.datetime = None
         self.latitude : float = None
         self.longitude : float = None
-        self.elevation : float = 0.0
+        self.elevation : float = None
+
         self.look_dir : np.ndarray = None
+        self.look_right : np.ndarray = None
         self.look_up : np.ndarray = None
+
         self.observer_matrix : np.ndarray = None
 
     def set_time(self, time : datetime.datetime):
@@ -32,19 +35,21 @@ class Observer:
         look_up_norm = np.linalg.norm(look_up)
 
         if np.isclose(look_dir_norm, 0, Config.FLOAT_TOL) or np.isclose(look_up_norm, 0, Config.FLOAT_TOL):
-            raise ValueError("look_dir and look_up must be non-zero vectors")
+            self.look_dir = None
+            self.look_up = None
+            self.look_right = None
+            self.observer_matrix = None
+            return
 
         self.look_dir = look_dir / look_dir_norm
         self.look_up = look_up / look_up_norm
 
-        right = np.cross(self.look_dir, self.look_up)
-        right_norm = np.linalg.norm(right)
+        self.look_right = np.cross(self.look_dir, self.look_up)
+        right_norm = np.linalg.norm(self.look_right)
 
         if np.isclose(right_norm, 0, Config.FLOAT_TOL):
             raise ValueError("look_dir and look_up must not be parallel")
 
-        right /= right_norm
-        up = np.cross(right, self.look_dir)
-        self.observer_matrix = np.array([right, up, self.look_dir])
-
-
+        self.look_right /= right_norm
+        self.look_up = np.cross(self.look_right, self.look_dir)
+        self.observer_matrix = np.array([self.look_right, self.look_up, self.look_dir])

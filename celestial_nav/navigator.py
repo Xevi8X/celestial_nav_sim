@@ -1,9 +1,11 @@
+import datetime
 import numpy as np
+from dataclasses import dataclass
+from PIL import Image
+from typing import Iterable, Optional, Union
 
 from common import Config, ECEF, Observer, Sky
 from .lost_in_space import LostInSpace
-
-from PIL import Image
 
 class Navigator:
     def __init__(self, sky : Sky, fov_range : tuple[int,int] =(40, 60), star_max_magnitude=7):
@@ -16,42 +18,135 @@ class Navigator:
     def find_solution(self, image: Image.Image) -> LostInSpace.Solution:
         solution = self._lis.solve(image)
         return solution
-    
-    def estimate_orientation(self, observer: Observer, image: Image.Image) -> Observer:
-        if observer.time is None or observer.latitude is None or observer.longitude is None:
-            raise ValueError("Observer time and location must be set before estimating orientation.")
-        
+
+    def estimate_orientation(self, image: Image.Image, time: datetime.datetime, latitude_deg: float, longitude_deg: float, elevation_m: float = 0.0) -> Observer:
+        observer = Observer()
+        observer.set_time(time)
+        observer.set_location(latitude=latitude_deg, longitude=longitude_deg, elevation=elevation_m)
         solution = self.find_solution(image)
-        observer2 = Observer()
-        observer2.set_time(observer.time)
-        observer2.set_location(latitude=observer.latitude, longitude=observer.longitude, elevation=observer.elevation)
-        dir_ecef, up_ecef = self.sky.radec_to_ecef(observer2, solution.ra, solution.dec, solution.roll)
+        dir_ecef, up_ecef = self.sky.radec_to_ecef(observer, solution.ra, solution.dec, solution.roll)
         ecef_to_ned = ECEF.ecef_to_ned(observer.latitude, observer.longitude)
         look_dir = ecef_to_ned @ dir_ecef
         look_up = ecef_to_ned @ up_ecef
-        observer2.set_look_direction(look_dir=look_dir, look_up=look_up)
-        return observer2
+        observer.set_look_direction(look_dir=look_dir, look_up=look_up)
+        return observer
 
-    def estimate_location(self, observer: Observer, image: Image.Image) -> Observer:
-        if observer.time is None or observer.look_dir is None or observer.look_up is None:
-            raise ValueError("Observer time and orientation must be set before estimating location.")
-        
-        solution = self.find_solution(image)
-        observer2 = Observer()
-        observer2.set_time(observer.time)
-        observer2.set_look_direction(look_dir=observer.look_dir, look_up=observer.look_up)
-        observer2.set_location(latitude=0.0, longitude=0.0, elevation=0.0)
+    @dataclass
+    class Location:
+        latitude_deg: float
+        longitude_deg: float
+
+    @dataclass
+    class ImageTimeOrientation:
+        image: Image.Image
+        time: datetime.datetime
+        look_dir_ned: np.ndarray
+        look_up_ned: np.ndarray
+
+    @dataclass
+    class ImageTimeZenit:
+        image: Image.Image
+        time: datetime.datetime
+        zenit_cam: np.ndarray
+
+    def estimate_location_full_orientation(self, data : Union[ImageTimeOrientation, Iterable[ImageTimeOrientation]]) -> Optional[Location]:
+        if isinstance(data, self.ImageTimeOrientation):
+            data = [data]
+
+        items = []
+
+        for item in data:
+            observer = Observer()
+            observer.set_time(item.time)
+            observer.set_look_direction(look_dir=item.look_dir_ned, look_up=item.look_up_ned)
+            observer.set_location(latitude=0.0, longitude=0.0)
+            solution = self.find_solution(item.image)
+            if solution:
+                items.append((observer, solution))
+
+        if not items:
+            return None
+
+        lat, lon = 0.0, 0.0
 
         for _ in range(Config.MAX_NAVIGATION_ITERATIONS):
-            dir_ecef, up_ecef = self.sky.radec_to_ecef(observer2, solution.ra, solution.dec, solution.roll)
+            ecef_vectors = []
+            ned_vectors = []
+
+            for observer, solution in items:
+                observer.set_location(latitude=lat, longitude=lon)
+                dir_ecef, up_ecef = self.sky.radec_to_ecef(observer, solution.ra, solution.dec, solution.roll)
+                ecef_vectors.append(dir_ecef)
+                ecef_vectors.append(up_ecef)
+                ned_vectors.append(observer.look_dir)
+                ned_vectors.append(observer.look_up)
+
+            ecef_vectors = np.array(ecef_vectors)
+            ned_vectors = np.array(ned_vectors)
             lat, lon = ECEF.find_location(
-                ecef_vectors=np.array([dir_ecef, up_ecef]),
-                ned_vectors=np.array([observer.look_dir, observer.look_up])
+                ecef_vectors=ecef_vectors,
+                ned_vectors=ned_vectors
             )
-            diff = np.linalg.norm(ECEF.north_east_vector(lat, lon, observer2.latitude, observer2.longitude))
-            observer2.set_location(latitude=lat, longitude=lon, elevation=0.0)
+
+            diff = np.linalg.norm(ECEF.north_east_vector(lat, lon, observer.latitude, observer.longitude))
             if diff < 1.0:
                 break
 
-        return observer2
 
+        return self.Location(latitude_deg=lat, longitude_deg=lon)
+
+    def estimate_location(self, data: Union[ImageTimeZenit, Iterable[ImageTimeZenit]]) -> Optional[Location]:
+        if isinstance(data, self.ImageTimeZenit):
+            data = [data]
+
+        items = []
+
+        for item in data:
+            zenit_cam = np.asarray(item.zenit_cam, dtype=float)
+            if zenit_cam.shape != (3,) or not np.isfinite(zenit_cam).all():
+                raise ValueError("zenit_cam must be a finite 3D vector")
+
+            norm = np.linalg.norm(zenit_cam)
+            if np.isclose(norm, 0.0, atol=Config.FLOAT_TOL):
+                raise ValueError("zenit_cam must be non-zero")
+
+            solution = self.find_solution(item.image)
+            if solution:
+                observer = Observer()
+                observer.set_time(item.time)
+                observer.set_location(latitude=0.0, longitude=0.0)
+                items.append((observer, solution, zenit_cam / norm))
+
+        if not items:
+            return None
+
+        lat, lon = 0.0, 0.0
+
+        for _ in range(Config.MAX_NAVIGATION_ITERATIONS):
+            previous_lat, previous_lon = lat, lon
+            zenits_ecef = []
+
+            for observer, solution, zenit_cam in items:
+                observer.set_location(latitude=lat, longitude=lon)
+                direction, up = self.sky.radec_to_ecef(observer, solution.ra, solution.dec, solution.roll)
+                right = np.cross(direction, up)
+                right /= np.linalg.norm(right)
+                up = np.cross(right, direction)
+
+                zenit_ecef = np.column_stack((right, up, direction)) @ zenit_cam
+                zenits_ecef.append(zenit_ecef / np.linalg.norm(zenit_ecef))
+
+            zenit_ecef = np.sum(zenits_ecef, axis=0)
+            norm = np.linalg.norm(zenit_ecef)
+            if np.isclose(norm, 0.0, atol=Config.FLOAT_TOL):
+                return None
+
+            x, y, z = zenit_ecef / norm
+            lat = np.degrees(np.arctan2(z, np.hypot(x, y)))
+            lon = np.degrees(np.arctan2(y, x))
+
+            diff = np.linalg.norm(ECEF.north_east_vector(previous_lat, previous_lon, lat, lon))
+            if diff < 1.0:
+                break
+
+        return self.Location(latitude_deg=lat, longitude_deg=lon)

@@ -13,8 +13,8 @@ class Observer:
         self.elevation : float = None
 
         self.look_dir : np.ndarray = None
-        self.look_right : np.ndarray = None
         self.look_up : np.ndarray = None
+        self.look_right : np.ndarray = None
 
         self.observer_matrix : np.ndarray = None
 

@@ -9,7 +9,7 @@ import numpy as np
 
 if __name__ == "__main__": 
     sky = Sky()
-    camera = Camera(fov=35.0, width=800, height=800, monochromatic=True)
+    camera = Camera(fov=35.0, width=2048, height=2048, monochromatic=True)
     renderer = render.Renderer(sky, camera)
 
     observer = Observer()
@@ -30,23 +30,32 @@ if __name__ == "__main__":
     plt.axis("off")
     plt.show()
 
-    observer_no_orientation = Observer()
-    observer_no_orientation.set_time(observer.time)
-    observer_no_orientation.set_location(latitude=observer.latitude, longitude=observer.longitude, elevation=observer.elevation)
-    observer2 = navigator.estimate_orientation(observer_no_orientation, image)
+    observer2 = navigator.estimate_orientation(image, time=observer.time, latitude_deg=observer.latitude, longitude_deg=observer.longitude, elevation_m=observer.elevation)
 
     print("Actual orientation: ", observer.look_dir, observer.look_up)
     print("Estimated orientation: ", observer2.look_dir, observer2.look_up)
 
-    observer_no_location = Observer()
-    observer_no_location.set_time(observer.time)
-    observer_no_location.set_look_direction(look_dir=observer.look_dir, look_up=observer.look_up)
-    observer3 = navigator.estimate_location(observer_no_location, image)
+    image_time_orientation = navigator.ImageTimeOrientation(
+        image=image,
+        time=observer.time,
+        look_dir_ned=observer.look_dir,
+        look_up_ned=observer.look_up
+    )
+    location = navigator.estimate_location_full_orientation(image_time_orientation)
 
     print("Actual location: ", observer.latitude, observer.longitude)
-    print("Estimated location: ", observer3.latitude, observer3.longitude)
-    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, observer3.latitude, observer3.longitude)), "m")
+    print("Estimated location: ", location.latitude_deg, location.longitude_deg)
+    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location.latitude_deg, location.longitude_deg)), "m")
+
+    image_time_zenit = navigator.ImageTimeZenit(
+        image=image,
+        time=observer.time,
+        zenit_cam=observer.observer_matrix @ np.array([0.0, 0.0, -1.0])
+    )
+    location = navigator.estimate_location(image_time_zenit)
+
+    print("Estimated location from zenit: ", location.latitude_deg, location.longitude_deg)
+    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location.latitude_deg, location.longitude_deg)), "m")
  
     
-
 

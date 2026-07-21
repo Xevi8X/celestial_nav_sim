@@ -10,12 +10,12 @@ class Camera:
 
     exposure_time: float = 0.1
     flux: float = 3e5
-    fwhm: float = 1.5
+    fwhm: float = 1.0
 
-    sky_background_e: float = 5.0
+    sky_background_e: float = 3.0
     ground_background_e: float = 20.0
     horizon_blur_px: float = 1.0
-    read_noise_e: float = 2.0
+    read_noise_e: float = 1.0
     
     monochromatic: bool = True
 

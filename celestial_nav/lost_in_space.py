@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-
 from PIL import Image
 from pathlib import Path
 from shutil import copy2
+from typing import Optional
 import tetra3
 
 from common import Config
@@ -51,13 +51,20 @@ class LostInSpace:
         self._t3 = tetra3.Tetra3(load_database=db_path)
         self._distortion = [-0.05, 0.05]
 
-    def solve(self, image: Image.Image):
+    def solve(self, image: Image.Image) -> Optional[Solution]:
         res = self._t3.solve_from_image(
             image, 
+            # pattern_checking_stars=12,
+            # match_radius=0.002,
+            # match_threshold=1e-6,
             distortion=self._distortion,
             return_visual=True
             )
-        Solution = LostInSpace.Solution(
+        
+        if res["RA"] is None or res["Dec"] is None or res["Roll"] is None:
+            return None
+        
+        solution = LostInSpace.Solution(
             ra=res["RA"],
             dec=res["Dec"],
             roll=res["Roll"],
@@ -66,5 +73,4 @@ class LostInSpace:
             false_positive_prob=res["Prob"],
             visual=res["visual"],
         )
-
-        return Solution
+        return solution

@@ -1,7 +1,8 @@
 from .config import Config
-from  .ecef import ECEF
+from .ecef import ECEF
+from .io import Io
 from .observer import Observer
 from .rotations import Rotation
 from .sky import Sky
 
-__all__ = ["Config", "ECEF", "Observer", "Rotation", "Sky"]
+__all__ = ["Config", "ECEF", "Io", "Observer", "Rotation", "Sky"]

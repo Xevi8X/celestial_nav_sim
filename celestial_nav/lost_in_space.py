@@ -17,6 +17,8 @@ class LostInSpace:
 
         fov: float
         distortion: float
+        rmse: float
+        matches: int
         false_positive_prob: float
 
         visual: Image.Image
@@ -49,7 +51,7 @@ class LostInSpace:
     
     def __init__(self, db_path):
         self._t3 = tetra3.Tetra3(load_database=db_path)
-        self._distortion = [-0.05, 0.05]
+        self._distortion = [-0.3, 0.3]
 
     def solve(self, image: Image.Image) -> Optional[Solution]:
         res = self._t3.solve_from_image(
@@ -68,8 +70,11 @@ class LostInSpace:
             ra=res["RA"],
             dec=res["Dec"],
             roll=res["Roll"],
+
             fov=res["FOV"],
             distortion=res["distortion"],
+            rmse=res["RMSE"],
+            matches=res["Matches"],
             false_positive_prob=res["Prob"],
             visual=res["visual"],
         )

@@ -24,6 +24,9 @@ class Navigator:
         observer.set_time(time)
         observer.set_location(latitude=latitude_deg, longitude=longitude_deg, elevation=elevation_m)
         solution = self.find_solution(image)
+        if solution is None:
+            return observer
+
         dir_ecef, up_ecef = self.sky.radec_to_ecef(observer, solution.ra, solution.dec, solution.roll)
         ecef_to_ned = ECEF.ecef_to_ned(observer.latitude, observer.longitude)
         look_dir = ecef_to_ned @ dir_ecef

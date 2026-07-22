@@ -15,7 +15,7 @@ class Io:
             header = hdul[0].header
 
         image = Image.fromarray(
-            np.flipud((data // 257).astype(np.uint8))
+            (data // 257).astype(np.uint8)
         )
 
         time = datetime.fromisoformat(header["DATE-OBS"].replace("Z", "+00:00"))

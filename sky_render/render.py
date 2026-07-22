@@ -1,4 +1,5 @@
 import numpy as np
+from PIL import Image
 
 from .camera import Camera
 from .canvas import Canvas
@@ -23,7 +24,10 @@ class Renderer:
         self._sky = sky
         self._camera = camera
 
-    def render(self, observer: Observer, noise_seed=None):
+    def set_camera(self, camera: Camera):
+        self._camera = camera
+
+    def render(self, observer: Observer, noise_seed=None) -> Image.Image:
         stars_info, stars_ned = self._sky.get_stars_ecef(observer)
         bodies_info, bodies_ned = self._sky.get_bodies_ecef(observer)
 

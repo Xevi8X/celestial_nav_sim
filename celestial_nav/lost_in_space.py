@@ -51,7 +51,7 @@ class LostInSpace:
     
     def __init__(self, db_path):
         self._t3 = tetra3.Tetra3(load_database=db_path)
-        self._distortion = [-0.3, 0.3]
+        self._distortion = [-0.1, 0.1]
 
     def solve(self, image: Image.Image) -> Optional[Solution]:
         res = self._t3.solve_from_image(

@@ -1,6 +1,34 @@
 from dataclasses import dataclass
+from enum import Enum, auto
+
 import numpy as np
-from scipy.ndimage import gaussian_filter
+
+
+class ImageFormat(Enum):
+    MONO8 = auto()
+    MONO16 = auto()
+    RGB8 = auto()
+
+    @property
+    def channels(self):
+        return 3 if self is ImageFormat.RGB8 else 1
+
+    @property
+    def dtype(self):
+        return np.uint16 if self is ImageFormat.MONO16 else np.uint8
+
+    @property
+    def max_value(self):
+        return 65535 if self is ImageFormat.MONO16 else 255
+
+    @property
+    def output_scale(self):
+        return 257.0 if self is ImageFormat.MONO16 else 1.0
+
+    @property
+    def monochromatic(self):
+        return self is not ImageFormat.RGB8
+
 
 @dataclass
 class Camera:
@@ -12,12 +40,10 @@ class Camera:
     flux: float = 3e5
     fwhm: float = 1.0
 
-    sky_background_e: float = 3.0
-    ground_background_e: float = 20.0
-    horizon_blur_px: float = 1.0
-    read_noise_e: float = 1.0
-    
-    monochromatic: bool = True
+    sky_background: float = 3.0
+    read_noise: float = 1.0
+
+    image_format: ImageFormat = ImageFormat.MONO8
 
     def __post_init__(self):
         if not 0 < self.fov < 180:
@@ -30,17 +56,17 @@ class Camera:
             raise ValueError("exposure_time must be positive")
         if self.flux <= 0:
             raise ValueError("flux must be positive")
-        if self.sky_background_e < 0 or self.ground_background_e < 0:
-            raise ValueError("background levels must be non-negative")
-        if self.horizon_blur_px < 0:
-            raise ValueError("horizon_blur_px must be non-negative")
-        if self.read_noise_e < 0:
-            raise ValueError("read_noise_e must be non-negative")
+        if self.sky_background < 0:
+            raise ValueError("sky_background must be non-negative")
+        if self.read_noise < 0:
+            raise ValueError("read_noise must be non-negative")
+        if not isinstance(self.image_format, ImageFormat):
+            raise TypeError("image_format must be an ImageFormat")
 
     @property
     def focal_length(self):
         return self.width / (2 * np.tan(np.radians(self.fov) / 2))
-    
+
     @property
     def camera_matrix(self):
         f = self.focal_length
@@ -51,7 +77,7 @@ class Camera:
         ])
         return intrinsics
 
-    def horizon_fractions(self, observer_matrix):
+    def ground_mask(self, observer_matrix):
         observer_matrix = np.asarray(observer_matrix, dtype=np.float64)
         if observer_matrix.shape != (3, 3):
             raise ValueError("observer_matrix must have shape (3, 3)")
@@ -61,12 +87,4 @@ class Camera:
         rays_camera = pixels @ np.linalg.inv(self.camera_matrix).T
         rays_ned = rays_camera @ observer_matrix
 
-        ground = (rays_ned[:, :, 2] > 0).astype(np.float32)
-        if self.horizon_blur_px > 0:
-            ground = gaussian_filter(
-                ground,
-                sigma=self.horizon_blur_px,
-                mode="nearest",
-            )
-        ground = np.clip(ground, 0, 1)
-        return 1 - ground, ground
+        return rays_ned[:, :, 2] > 0

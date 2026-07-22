@@ -1,7 +1,7 @@
 from celestial_nav import Navigator
 from common import Observer, Sky
 from common.ecef import ECEF
-from sky_render import Camera, render
+from sky_render import Camera, ImageFormat, render
 
 import datetime
 import matplotlib.pyplot as plt
@@ -9,7 +9,12 @@ import numpy as np
 
 if __name__ == "__main__": 
     sky = Sky()
-    camera = Camera(fov=35.0, width=2048, height=2048, monochromatic=True)
+    camera = Camera(
+        fov=35.0,
+        width=2048,
+        height=2048,
+        image_format=ImageFormat.MONO8,
+    )
     renderer = render.Renderer(sky, camera)
 
     time = datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))

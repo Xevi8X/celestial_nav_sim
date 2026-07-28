@@ -5,18 +5,22 @@ from datetime import datetime, timezone
 import numpy as np
 from PIL import Image
 from astropy.io import fits
-from astropy.visualization import ImageNormalize, ZScaleInterval, SqrtStretch
 
 class Io:
     @staticmethod
     def load_fits(path: Union[str, Path]) -> tuple[Image.Image, datetime, float, float]:
         with fits.open(path, lazy_load_hdus=True) as hdul:
-            data = hdul[0].data.astype(np.uint16)
+            data = np.asarray(hdul[0].data)
             header = hdul[0].header
 
-        image = Image.fromarray(
-            (data // 257).astype(np.uint8)
-        )
+        if not np.isfinite(data).all():
+            raise ValueError("FITS image contains non-finite values")
+        if np.issubdtype(data.dtype, np.integer) and data.dtype.itemsize == 1:
+            data = np.clip(data, 0, 255).astype(np.uint8)
+        else:
+            data = np.clip(data, 0, 65535).astype(np.uint16)
+
+        image = Image.fromarray(data)
 
         time = datetime.fromisoformat(header["DATE-OBS"].replace("Z", "+00:00"))
         if time.tzinfo is None:

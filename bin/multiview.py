@@ -14,6 +14,7 @@ if __name__ == "__main__":
         width=2048,
         height=2048,
         image_format=ImageFormat.MONO8,
+        fwhm = 7.0
     )
     renderer = render.Renderer(sky, camera)
 
@@ -26,10 +27,10 @@ if __name__ == "__main__":
 
     data = []
 
-    for _ in range(10):
+    for _ in range(100):
         time += datetime.timedelta(seconds=1)
         observer.set_time(time)
-        image = renderer.render(observer, noise_seed=42)
+        image = renderer.render(observer)
         data.append(Navigator.ImageTimeZenit(
             image=image.copy(),
             time=observer.time,
@@ -38,6 +39,11 @@ if __name__ == "__main__":
 
     navigator = Navigator(sky, fov_range=(30, 40), star_max_magnitude=7)
     location = navigator.estimate_location(data)
+    location2 = navigator.estimate_location(data[0])
+
 
     print("Estimated location from zenit: ", location.latitude_deg, location.longitude_deg)
     print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location.latitude_deg, location.longitude_deg)), "m")
+
+    print("Estimated location2 from zenit: ", location2.latitude_deg, location2.longitude_deg)
+    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location2.latitude_deg, location2.longitude_deg)), "m")

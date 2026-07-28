@@ -11,8 +11,8 @@ if __name__ == "__main__":
     sky = Sky()
     camera = Camera(
         fov=35.0,
-        width=2048,
-        height=2048,
+        width=1024,
+        height=1024,
         image_format=ImageFormat.MONO8,
     )
     renderer = render.Renderer(sky, camera)
@@ -20,8 +20,8 @@ if __name__ == "__main__":
     observer = Observer()
     observer.set_time(datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=2))))
     observer.set_location(latitude=52.2297, longitude=21.0122, elevation=0.0)
-    observer.set_look_direction(look_dir=[0.0, -1.0, -3], look_up=[0, 0, -1])
-    image = renderer.render(observer)
+    observer.set_look_direction(look_dir=[-1.0, 0.0, -5], look_up=[0, 0, -1])
+    image = renderer.render(observer, noise_seed = 42)
 
     plt.imshow(image, cmap="gray")
     plt.axis("off")

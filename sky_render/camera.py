@@ -37,8 +37,8 @@ class Camera:
     height: int
 
     exposure_time: float = 0.1
-    flux: float = 3e5
-    fwhm: float = 1.0
+    flux: float = 5e5
+    fwhm: float = 3.0
 
     sky_background: float = 3.0
     read_noise: float = 1.0

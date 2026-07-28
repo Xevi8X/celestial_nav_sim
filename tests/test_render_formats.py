@@ -1,3 +1,4 @@
+import datetime
 from dataclasses import fields
 import tempfile
 import unittest
@@ -105,6 +106,7 @@ class ImageFormatTests(unittest.TestCase):
 class RenderFormatTests(unittest.TestCase):
     def setUp(self):
         self.observer = SimpleNamespace(
+            time=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
             latitude=0.0,
             longitude=0.0,
             observer_matrix=SKY_MATRIX,

@@ -1,9 +1,13 @@
+import copy
+import datetime
+import math
+
 import numpy as np
 from PIL import Image
 
 from .camera import Camera
 from .canvas import Canvas
-from common import ECEF, Observer, Sky
+from common import Config, ECEF, Observer, Sky
 
 RENDER_COLORS = {
     "Sun": (255, 255, 0),
@@ -27,7 +31,12 @@ class Renderer:
     def set_camera(self, camera: Camera):
         self._camera = camera
 
-    def render(self, observer: Observer, noise_seed=None) -> Image.Image:
+    def _draw_sources(
+        self,
+        canvas: Canvas,
+        observer: Observer,
+        exposure_time: float,
+    ):
         stars_info, stars_ned = self._sky.get_stars_ecef(observer)
         bodies_info, bodies_ned = self._sky.get_bodies_ecef(observer)
 
@@ -56,26 +65,57 @@ class Renderer:
 
         stars_visible = visible(stars_ned, star_xy, star_z)
         bodies_visible = visible(bodies_ned, body_xy, body_z)
-        canvas = Canvas(self._camera)
 
         for point, info in zip(
             star_xy[stars_visible],
-            np.asarray(stars_info, dtype=object)[stars_visible]
+            np.asarray(stars_info, dtype=object)[stars_visible],
         ):
-            canvas.draw(point, info.magnitude)
+            canvas.draw(point, info.magnitude, exposure_time=exposure_time)
 
         for point, vector, info in zip(
             body_xy[bodies_visible],
             bodies_ned[bodies_visible],
-            np.asarray(bodies_info, dtype=object)[bodies_visible]
+            np.asarray(bodies_info, dtype=object)[bodies_visible],
         ):
             distance = np.linalg.norm(vector)
             angular_radius = np.arcsin(np.clip(info.radius_km / distance, 0, 1))
             radius_px = self._camera.focal_length * np.tan(angular_radius)
             color = RENDER_COLORS.get(info.name, (255, 255, 255))
-            canvas.draw(point, info.apparent_magnitude, radius_px, color)
+            canvas.draw(
+                point,
+                info.apparent_magnitude,
+                radius_px,
+                color,
+                exposure_time=exposure_time,
+            )
+
+    def _render_canvas(self, observer: Observer) -> Canvas:
+        canvas = Canvas(self._camera)
+        max_exposure_step = Config.MAX_EXPOSURE_STEP
+        if not math.isfinite(max_exposure_step) or max_exposure_step <= 0:
+            raise ValueError("MAX_EXPOSURE_STEP must be positive")
+        sample_count = math.ceil(
+            self._camera.exposure_time / max_exposure_step
+        )
+        sample_exposure = self._camera.exposure_time / sample_count
+        start_time = observer.time - datetime.timedelta(
+            seconds=self._camera.exposure_time
+        )
+        for index in range(sample_count):
+            sample_observer = copy.copy(observer)
+            sample_observer.time = start_time + datetime.timedelta(
+                seconds=(index + 0.5) * sample_exposure
+            )
+            self._draw_sources(canvas, sample_observer, sample_exposure)
 
         canvas.add_horizon(observer.observer_matrix)
-        canvas.add_noise(noise_seed)
 
+        return canvas
+
+    def render_expected(self, observer: Observer) -> np.ndarray:
+        return self._render_canvas(observer).linear_image()
+
+    def render(self, observer: Observer, noise_seed=None) -> Image.Image:
+        canvas = self._render_canvas(observer)
+        canvas.add_noise(noise_seed)
         return canvas.image()

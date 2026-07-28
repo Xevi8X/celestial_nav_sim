@@ -15,15 +15,31 @@ class Navigator:
             db_path = LostInSpace.generate_db(min_fov=fov_range[0], max_fov=fov_range[1], star_max_magnitude=star_max_magnitude)
         self._lis = LostInSpace(db_path)
 
+    @staticmethod
+    def _navigation_image(image: Image.Image) -> Image.Image:
+        if image.mode == "I" or image.mode.startswith("I;16"):
+            data = np.asarray(image, dtype=np.float64) / 257.0
+            return Image.fromarray(np.clip(data, 0, 255).astype(np.uint8))
+        return image.convert("L")
+
     def find_solution(self, image: Image.Image) -> LostInSpace.Solution:
-        solution = self._lis.solve(image)
+        solution = self._lis.solve(self._navigation_image(image))
         return solution
 
-    def estimate_orientation(self, image: Image.Image, time: datetime.datetime, latitude_deg: float, longitude_deg: float, elevation_m: float = 0.0) -> Observer:
+    def estimate_orientation(
+        self,
+        image: Image.Image,
+        time: datetime.datetime,
+        latitude_deg: float,
+        longitude_deg: float,
+        elevation_m: float = 0.0,
+        solution: LostInSpace.Solution = None,
+    ) -> Observer:
         observer = Observer()
         observer.set_time(time)
         observer.set_location(latitude=latitude_deg, longitude=longitude_deg, elevation=elevation_m)
-        solution = self.find_solution(image)
+        if solution is None:
+            solution = self.find_solution(image)
         if solution is None:
             return observer
 

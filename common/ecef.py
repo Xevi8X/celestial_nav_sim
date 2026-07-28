@@ -17,7 +17,6 @@ class ECEF:
         )
 
         x, y, z = -rotation[2]
-
         latitude = np.degrees(np.arctan2(z, np.hypot(x, y)))
         longitude = np.degrees(np.arctan2(y, x))
 

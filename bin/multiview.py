@@ -1,7 +1,13 @@
 from celestial_nav import Navigator
 from common import Observer, Sky
 from common.ecef import ECEF
-from sky_render import Camera, ImageFormat, render
+from sky_render import (
+    Camera,
+    CameraGeometry,
+    CameraImageModel,
+    ImageFormat,
+    render,
+)
 
 import datetime
 import matplotlib.pyplot as plt
@@ -10,11 +16,13 @@ import numpy as np
 if __name__ == "__main__": 
     sky = Sky()
     camera = Camera(
-        fov=35.0,
-        width=2048,
-        height=2048,
-        image_format=ImageFormat.MONO8,
-        fwhm = 7.0
+        CameraGeometry(
+            fov=35.0,
+            width=2048,
+            height=2048,
+            image_format=ImageFormat.MONO8,
+        ),
+        CameraImageModel(fwhm=7.0),
     )
     renderer = render.Renderer(sky, camera)
 

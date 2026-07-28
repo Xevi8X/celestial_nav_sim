@@ -10,9 +10,20 @@ if __name__ == "__main__":
     image, time, lat, lon = Io.load_fits(path)
 
     sky = Sky(magnitude_limit=10)
-    calibrator = Calibrator(sky)
-    observer, camera = calibrator.estimate_camera(image, time, lat, lon, elevation_m=0.0, exposure_time=0.215)
+    calibrator = Calibrator(
+        sky,
+        exposure_time=0.215,
+        visualize=True,
+    )
+    observer, camera = calibrator.estimate_camera(
+        image,
+        time,
+        lat,
+        lon,
+        elevation_m=0.0,
+    )
 
+    for report in calibrator.last_reports:
+        print(report)
     print(observer)
     print(camera)
-

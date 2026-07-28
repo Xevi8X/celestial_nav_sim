@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from PIL import Image
 from pathlib import Path
 from shutil import copy2
-from typing import Optional
+from typing import Any, Optional
 import tetra3
 
 from common import Config
+
 
 class LostInSpace:
 
@@ -22,6 +23,11 @@ class LostInSpace:
         false_positive_prob: float
 
         visual: Image.Image
+
+        # Match payloads are intentionally kept exactly as tetra3 returned them.
+        matched_centroids: Any = None
+        matched_stars: Any = None
+        matched_catalog_ids: Any = None
 
     @staticmethod
     def get_db_path(min_fov, max_fov, star_max_magnitude):
@@ -52,19 +58,29 @@ class LostInSpace:
     def __init__(self, db_path):
         self._t3 = tetra3.Tetra3(load_database=db_path)
 
-    def solve(self, image: Image.Image, distortion = [-0.1, 0.1]) -> Optional[Solution]:
+    def solve(
+        self,
+        image: Image.Image,
+        distortion=(-0.1, 0.1),
+    ) -> Optional[Solution]:
         res = self._t3.solve_from_image(
-            image, 
+            image,
             # pattern_checking_stars=12,
             # match_radius=0.002,
             # match_threshold=1e-6,
             distortion=distortion,
+            return_matches=True,
             return_visual=True
             )
-        
-        if res["RA"] is None or res["Dec"] is None or res["Roll"] is None:
+
+        if (
+            not res
+            or res.get("RA") is None
+            or res.get("Dec") is None
+            or res.get("Roll") is None
+        ):
             return None
-        
+
         solution = LostInSpace.Solution(
             ra=res["RA"],
             dec=res["Dec"],
@@ -76,5 +92,8 @@ class LostInSpace:
             matches=res["Matches"],
             false_positive_prob=res["Prob"],
             visual=res["visual"],
+            matched_centroids=res.get("matched_centroids"),
+            matched_stars=res.get("matched_stars"),
+            matched_catalog_ids=res.get("matched_catID"),
         )
         return solution

@@ -9,8 +9,19 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from sky_render import Camera, ImageFormat, Renderer
+from sky_render import (
+    Camera,
+    CameraGeometry,
+    CameraImageModel,
+    ImageFormat,
+    Renderer,
+)
 from sky_render.canvas import Canvas
+from sky_render.psf import (
+    point_spread_kernel,
+    point_spread_support,
+    point_spread_taper_start,
+)
 
 
 WIDTH = 9
@@ -41,15 +52,19 @@ class NoiseFreeRng:
 
 def make_camera(image_format):
     return Camera(
-        fov=60.0,
-        width=WIDTH,
-        height=HEIGHT,
-        exposure_time=0.5,
-        flux=100.0,
-        fwhm=1.0,
-        sky_background=12.0,
-        read_noise=1.0,
-        image_format=image_format,
+        CameraGeometry(
+            fov=60.0,
+            width=WIDTH,
+            height=HEIGHT,
+            image_format=image_format,
+        ),
+        CameraImageModel(
+            exposure_time=0.5,
+            flux=100.0,
+            fwhm=1.0,
+            sky_background=12.0,
+            read_noise=1.0,
+        ),
     )
 
 
@@ -64,9 +79,9 @@ def make_finalized_canvas(image_format, seed=123):
 class ImageFormatTests(unittest.TestCase):
     def test_properties(self):
         expected = {
-            ImageFormat.MONO8: (1, np.uint8, 255, 1.0, True),
-            ImageFormat.MONO16: (1, np.uint16, 65535, 257.0, True),
-            ImageFormat.RGB8: (3, np.uint8, 255, 1.0, False),
+            ImageFormat.MONO8: (1, np.uint8, 255, 1.0, 1.0, True),
+            ImageFormat.MONO16: (1, np.uint16, 65535, 1.0, 257.0, True),
+            ImageFormat.RGB8: (3, np.uint8, 255, 1.0, 1.0, False),
         }
 
         self.assertEqual(set(ImageFormat), set(expected))
@@ -78,27 +93,37 @@ class ImageFormatTests(unittest.TestCase):
                         image_format.dtype,
                         image_format.max_value,
                         image_format.output_scale,
+                        image_format.navigation_scale,
                         image_format.monochromatic,
                     ),
                     properties,
                 )
 
         self.assertIs(
-            Camera(fov=60.0, width=WIDTH, height=HEIGHT).image_format,
+            CameraGeometry(fov=60.0, width=WIDTH, height=HEIGHT).image_format,
             ImageFormat.MONO8,
         )
         self.assertEqual(
             [field.name for field in fields(Camera)],
+            ["geometry", "image_model"],
+        )
+        self.assertEqual(
+            [field.name for field in fields(CameraGeometry)],
             [
                 "fov",
                 "width",
                 "height",
+                "image_format",
+            ],
+        )
+        self.assertEqual(
+            [field.name for field in fields(CameraImageModel)],
+            [
                 "exposure_time",
                 "flux",
                 "fwhm",
                 "sky_background",
                 "read_noise",
-                "image_format",
             ],
         )
 
@@ -182,15 +207,77 @@ class RenderFormatTests(unittest.TestCase):
                 self.assertEqual(array.shape, shape)
                 self.assertFalse(array.any())
 
+    def test_mono16_noise_uses_native_count_units(self):
+        expected_background = 400.0
+        expected_read_noise = 5.0
+        camera = Camera(
+            CameraGeometry(
+                fov=60.0,
+                width=256,
+                height=256,
+                image_format=ImageFormat.MONO16,
+            ),
+            CameraImageModel(
+                exposure_time=1.0,
+                sky_background=expected_background,
+                read_noise=expected_read_noise,
+            ),
+        )
+        self.assertFalse(camera.ground_mask(SKY_MATRIX).any())
+
+        canvas = Canvas(camera)
+        canvas.add_horizon(SKY_MATRIX)
+        canvas.add_noise(seed=123)
+        values = np.asarray(canvas.image(), dtype=np.float64)
+
+        self.assertAlmostEqual(
+            float(np.median(values)),
+            expected_background,
+            delta=2.0,
+        )
+        self.assertAlmostEqual(
+            float(np.std(values)),
+            np.sqrt(expected_background + expected_read_noise ** 2),
+            delta=1.0,
+        )
+        self.assertGreater(np.unique(values).size, 100)
+        self.assertTrue(np.any(values % 257))
+
+    def test_point_sources_have_normalized_moffat_wings(self):
+        yy, xx = np.indices((61, 61), dtype=np.float64)
+        fwhm = 4.0
+        kernel = point_spread_kernel(
+            xx,
+            yy,
+            centroid_x=30.25,
+            centroid_y=29.75,
+            fwhm=fwhm,
+        )
+
+        self.assertAlmostEqual(float(np.sum(kernel)), 1.0)
+        self.assertGreater(kernel[30, 42], 0.0)
+        taper_start = int(np.ceil(point_spread_taper_start(fwhm)))
+        edge = int(np.floor(point_spread_support(fwhm)))
+        self.assertLess(
+            kernel[30, 30 + edge],
+            kernel[30, 30 + taper_start] * 0.1,
+        )
+        outside = int(np.ceil(point_spread_support(fwhm))) + 1
+        self.assertEqual(kernel[30, 30 + outside], 0.0)
+
     def test_horizon_mask_is_sharp_and_ground_background_is_scaled(self):
         camera = Camera(
-            fov=90.0,
-            width=5,
-            height=5,
-            exposure_time=2.0,
-            sky_background=4.0,
-            read_noise=0.0,
-            image_format=ImageFormat.MONO8,
+            CameraGeometry(
+                fov=90.0,
+                width=5,
+                height=5,
+                image_format=ImageFormat.MONO8,
+            ),
+            CameraImageModel(
+                exposure_time=2.0,
+                sky_background=4.0,
+                read_noise=0.0,
+            ),
         )
         ground = camera.ground_mask(HORIZONTAL_MATRIX)
         expected_ground = np.array(

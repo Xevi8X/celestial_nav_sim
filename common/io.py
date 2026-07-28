@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 from datetime import datetime, timezone
 
 import numpy as np
@@ -8,7 +8,7 @@ from astropy.io import fits
 
 class Io:
     @staticmethod
-    def load_fits(path: Union[str, Path]) -> tuple[Image.Image, datetime, float, float]:
+    def load_fits(path: Union[str, Path]) -> tuple[Image.Image, datetime, Optional[float], Optional[float]]:
         with fits.open(path, lazy_load_hdus=True) as hdul:
             data = np.asarray(hdul[0].data)
             header = hdul[0].header
@@ -26,4 +26,7 @@ class Io:
         if time.tzinfo is None:
             time = time.replace(tzinfo=timezone.utc)
 
-        return image, time, float(header["LAT-OBS"]), float(header["LONG-OBS"])
+        lat = float(header["LAT-OBS"]) if "LAT-OBS" in header else None
+        lon = float(header["LONG-OBS"]) if "LONG-OBS" in header else None
+
+        return image, time, lat, lon

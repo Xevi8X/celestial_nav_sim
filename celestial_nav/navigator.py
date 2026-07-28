@@ -22,7 +22,10 @@ class Navigator:
             return Image.fromarray(np.clip(data, 0, 255).astype(np.uint8))
         return image.convert("L")
 
-    def find_solution(self, image: Image.Image) -> LostInSpace.Solution:
+    def find_solution(
+        self,
+        image: Image.Image,
+    ) -> Optional[LostInSpace.Solution]:
         solution = self._lis.solve(self._navigation_image(image))
         return solution
 
@@ -33,13 +36,12 @@ class Navigator:
         latitude_deg: float,
         longitude_deg: float,
         elevation_m: float = 0.0,
-        solution: LostInSpace.Solution = None,
     ) -> Observer:
         observer = Observer()
         observer.set_time(time)
         observer.set_location(latitude=latitude_deg, longitude=longitude_deg, elevation=elevation_m)
-        if solution is None:
-            solution = self.find_solution(image)
+        solution = self.find_solution(image)
+
         if solution is None:
             return observer
 

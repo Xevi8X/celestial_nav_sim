@@ -55,12 +55,13 @@ class Renderer:
         body_xy, body_z = _project(bodies_ned)
 
         def visible(ned, xy, z):
+            geometry = self._camera.geometry
             return (
                 (ned[:, 2] < 0) &
                 (z > 0) &
                 np.isfinite(xy).all(axis=1) &
-                (xy[:, 0] >= 0) & (xy[:, 0] < self._camera.width) &
-                (xy[:, 1] >= 0) & (xy[:, 1] < self._camera.height)
+                (xy[:, 0] >= 0) & (xy[:, 0] < geometry.width) &
+                (xy[:, 1] >= 0) & (xy[:, 1] < geometry.height)
             )
 
         stars_visible = visible(stars_ned, star_xy, star_z)
@@ -91,15 +92,16 @@ class Renderer:
 
     def _render_canvas(self, observer: Observer) -> Canvas:
         canvas = Canvas(self._camera)
+        exposure_time = self._camera.image_model.exposure_time
         max_exposure_step = Config.MAX_EXPOSURE_STEP
         if not math.isfinite(max_exposure_step) or max_exposure_step <= 0:
             raise ValueError("MAX_EXPOSURE_STEP must be positive")
         sample_count = math.ceil(
-            self._camera.exposure_time / max_exposure_step
+            exposure_time / max_exposure_step
         )
-        sample_exposure = self._camera.exposure_time / sample_count
+        sample_exposure = exposure_time / sample_count
         start_time = observer.time - datetime.timedelta(
-            seconds=self._camera.exposure_time
+            seconds=exposure_time
         )
         for index in range(sample_count):
             sample_observer = copy.copy(observer)

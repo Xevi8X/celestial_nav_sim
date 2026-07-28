@@ -1,15 +1,17 @@
 from common import Observer, Sky
-from sky_render import Camera, ImageFormat, Renderer
+from sky_render import Camera, CameraGeometry, ImageFormat, Renderer
 import datetime
 import matplotlib.pyplot as plt
 
 if __name__ == "__main__":
     sky = Sky()
     camera = Camera(
-        fov=80.0,
-        width=800,
-        height=640,
-        image_format=ImageFormat.RGB8,
+        CameraGeometry(
+            fov=80.0,
+            width=800,
+            height=640,
+            image_format=ImageFormat.RGB8,
+        ),
     )
     renderer = Renderer(sky, camera)
 

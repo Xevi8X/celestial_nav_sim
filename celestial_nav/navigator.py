@@ -26,7 +26,10 @@ class Navigator:
         self,
         image: Image.Image,
     ) -> Optional[LostInSpace.Solution]:
-        solution = self._lis.solve(self._navigation_image(image))
+        solution = self._lis.solve(
+            self._navigation_image(image),
+            distortion=0.0,
+        )
         return solution
 
     def estimate_orientation(

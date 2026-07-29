@@ -4,6 +4,7 @@ import datetime
 import numpy as np
 
 from common import Config
+from common.rotations import Rotation
 
 class Observer:
     def __init__(self):
@@ -53,3 +54,23 @@ class Observer:
         self.look_right /= right_norm
         self.look_up = np.cross(self.look_right, self.look_dir)
         self.observer_matrix = np.array([self.look_right, self.look_up, self.look_dir])
+
+    def set_orientation(self, roll, pitch, yaw):
+        roll, pitch, yaw = np.radians([roll, pitch, yaw])
+
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cr, sr = np.cos(roll), np.sin(roll)
+
+        self.look_dir = np.array([cp * cy, cp * sy, -sp])
+        right = np.array([-sy, cy, 0.0])
+        up = np.cross(right, self.look_dir)
+
+        self.look_right = cr * right - sr * up
+        self.look_up = sr * right + cr * up
+
+        self.observer_matrix = np.vstack([
+            self.look_right,
+            self.look_up,
+            self.look_dir,
+        ])

@@ -7,6 +7,7 @@ class Config:
     CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache"
     EPHEMERIS = "de440s.bsp"
     FLOAT_TOL = 1e-6
+    GRAVITY = 9.805
     GROUND_BACKGROUND_SCALE = GROUND_BACKGROUND_SCALE
     MAX_EXPOSURE_STEP = 1.0
     MAX_NAVIGATION_ITERATIONS = 10

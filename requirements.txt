@@ -4,6 +4,7 @@ matplotlib
 numpy<2
 pandas
 Pillow
+pygeomag==1.1.0
 scipy
 skyfield
 git+https://github.com/esa/tetra3.git

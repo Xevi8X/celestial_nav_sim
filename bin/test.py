@@ -7,7 +7,7 @@ from tools import Calibrator
 
 if __name__ == "__main__":
     path = Path(__file__).parent.parent / ".data" / "image.fit"
-    image, time, lat, lon = Io.load_fits(path)
+    data = Io.load_fits(path)
 
     sky = Sky(magnitude_limit=10)
     calibrator = Calibrator(
@@ -16,11 +16,11 @@ if __name__ == "__main__":
         visualize=True,
     )
     observer, camera = calibrator.estimate_camera(
-        image,
-        time,
-        lat,
-        lon,
-        elevation_m=0.0,
+        data.image,
+        data.observation_time,
+        data.latitude_deg,
+        data.longitude_deg,
+        elevation_m=data.elevation_m,
     )
 
     for report in calibrator.last_reports:

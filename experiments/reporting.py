@@ -17,11 +17,19 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from matplotlib.figure import Figure
 from PIL import Image, ImageDraw, ImageFont
+
+
+if TYPE_CHECKING:
+    from .accelerometer_calibration import Output as AccelerometerCalibrationOutput
+    from .common import Location
+    from .magnetometer_calibration import Output as MagnetometerCalibrationOutput
+    from .renderer_tuning import Output as RendererTuningOutput
+    from .static_position import Output as StaticPositionOutput
 
 
 ARTIFACT_FILENAMES = MappingProxyType(
@@ -369,7 +377,7 @@ def plot_renderer_histograms(
             x_values = [float(row[intensity_field]) for row in selected]
             y_values = [float(row[value_field]) for row in selected]
             if x_values:
-                axis.scatter(
+                axis.plot(
                     x_values,
                     y_values,
                     label=str(series_name),
@@ -387,6 +395,7 @@ _ACCELEROMETER_METRICS = MappingProxyType(
         "rotation_error_deg": "Rotation error (deg)",
         "scale_error_percent": "Scale error (%)",
         "bias_error_mps2": "Bias error (m/s²)",
+        "calibration_time_s": "Calibration time (s)",
     }
 )
 
@@ -399,7 +408,7 @@ def plot_accelerometer_results(
     location_field: str = "location",
     azimuth_field: str = "azimuth_deg",
 ) -> Path:
-    """Plot calibration errors for every location and azimuth.
+    """Plot calibration errors and duration for every location and azimuth.
 
     Repeated records for one location/azimuth pair are represented by their
     arithmetic mean.  Missing or non-finite metric values are omitted.
@@ -685,3 +694,207 @@ def write_renderer_montage(
         eps_destination.parent.mkdir(parents=True, exist_ok=True)
         montage.save(eps_destination, format="EPS")
     return png_destination, eps_destination
+
+
+def _camera_parameters(camera: Any) -> Mapping[str, float]:
+    return {
+        "field_of_view_deg": float(camera.geometry.fov),
+        "stellar_flux_counts_per_s": float(camera.image_model.flux),
+        "point_spread_fwhm_px": float(camera.image_model.fwhm),
+        "background_counts_per_s": float(camera.image_model.sky_background),
+        "read_noise_counts": float(camera.image_model.read_noise),
+    }
+
+
+def _renderer_parameter_table(
+    output: "RendererTuningOutput",
+) -> list[dict[str, object]]:
+    definitions = (
+        ("Field of view", "field_of_view_deg", "deg"),
+        (
+            "Stellar flux",
+            "stellar_flux_counts_per_s",
+            "counts s^-1 for magnitude 0",
+        ),
+        ("Point-spread width", "point_spread_fwhm_px", "px FWHM"),
+        ("Background", "background_counts_per_s", "counts s^-1"),
+        ("Read noise", "read_noise_counts", "counts RMS"),
+    )
+    fitted = tuple(_camera_parameters(camera) for camera in output.fitted_cameras)
+    average = _camera_parameters(output.camera)
+    return [
+        {
+            "parameter": label,
+            **{
+                f"image{index}": parameters[field]
+                for index, parameters in enumerate(fitted, start=1)
+            },
+            "average": average[field],
+            "unit": unit,
+        }
+        for label, field, unit in definitions
+    ]
+
+
+def _validate_renderer_output(output: "RendererTuningOutput") -> int:
+    counts = {
+        len(output.fitted_cameras),
+        len(output.observers),
+        len(output.photos),
+        len(output.rendered_photos),
+    }
+    if len(counts) != 1 or 0 in counts:
+        raise ValueError("renderer output photo counts must match and be nonzero")
+    return counts.pop()
+
+
+def report_renderer_tuning(
+    output: "RendererTuningOutput",
+    output_directory: str | Path,
+) -> tuple[Path, ...]:
+    """Write renderer-tuning tables, comparisons, and histogram artifacts."""
+
+    destination = Path(output_directory)
+    photo_count = _validate_renderer_output(output)
+    image_fields = tuple(
+        f"image{index}"
+        for index in range(1, photo_count + 1)
+    )
+    parameter_csv = write_records_csv(
+        destination / ARTIFACT_FILENAMES["renderer_tuning_results"],
+        _renderer_parameter_table(output),
+        fieldnames=("parameter", *image_fields, "average", "unit"),
+    )
+    montage_rows = (
+        {
+            "image_id": f"Image {index}",
+            "real_image": real,
+            "rendered_image": rendered,
+        }
+        for index, (real, rendered) in enumerate(
+            zip(output.photos, output.rendered_photos),
+            start=1,
+        )
+    )
+    montage_png, montage_eps = write_renderer_montage(
+        montage_rows,
+        destination / ARTIFACT_FILENAMES["renderer_image_comparison_png"],
+        eps_path=(
+            destination / ARTIFACT_FILENAMES["renderer_image_comparison_eps"]
+        ),
+    )
+    assert montage_eps is not None
+    histogram_eps = plot_renderer_histograms(
+        output.histograms,
+        destination / ARTIFACT_FILENAMES["renderer_histogram_comparison"],
+    )
+    histogram_csv = write_records_csv(
+        destination / "raw" / "renderer_histograms.csv",
+        output.histograms,
+    )
+    return (
+        parameter_csv,
+        montage_png,
+        montage_eps,
+        histogram_eps,
+        histogram_eps.with_suffix(".png"),
+        histogram_csv,
+    )
+
+
+def report_accelerometer_calibration(
+    output: "AccelerometerCalibrationOutput",
+    output_directory: str | Path,
+    locations: Sequence["Location"],
+) -> tuple[Path, ...]:
+    """Write accelerometer-calibration tables, plot, and raw updates."""
+
+    destination = Path(output_directory)
+    locations_csv = write_artifact_csv(
+        destination,
+        "simulation_locations",
+        (
+            {
+                "location": location.name,
+                "latitude_deg": location.latitude_deg,
+                "longitude_deg": location.longitude_deg,
+            }
+            for location in locations
+        ),
+    )
+    results_csv = write_artifact_csv(
+        destination,
+        "accelerometer_results",
+        output.results,
+    )
+    figure_eps = plot_accelerometer_results(
+        output.results,
+        destination / ARTIFACT_FILENAMES["accelerometer_figure"],
+    )
+    updates_csv = write_records_csv(
+        destination / "raw" / "accelerometer_updates.csv",
+        output.updates,
+    )
+    return (
+        locations_csv,
+        results_csv,
+        figure_eps,
+        figure_eps.with_suffix(".png"),
+        updates_csv,
+    )
+
+
+def report_magnetometer_calibration(
+    output: "MagnetometerCalibrationOutput",
+    output_directory: str | Path,
+) -> tuple[Path, ...]:
+    """Write magnetometer-calibration table, plot, and raw updates."""
+
+    destination = Path(output_directory)
+    results_csv = write_artifact_csv(
+        destination,
+        "magnetometer_results",
+        output.results,
+    )
+    figure_eps = plot_magnetometer_results(
+        output.results,
+        destination / ARTIFACT_FILENAMES["magnetometer_figure"],
+    )
+    updates_csv = write_records_csv(
+        destination / "raw" / "magnetometer_updates.csv",
+        output.updates,
+    )
+    return (
+        results_csv,
+        figure_eps,
+        figure_eps.with_suffix(".png"),
+        updates_csv,
+    )
+
+
+def report_static_position(
+    output: "StaticPositionOutput",
+    output_directory: str | Path,
+) -> tuple[Path, ...]:
+    """Write static-position table, plot, and raw observations."""
+
+    destination = Path(output_directory)
+    results_csv = write_artifact_csv(
+        destination,
+        "position_results",
+        output.results,
+    )
+    figure_eps = plot_position_results(
+        output.results,
+        destination / ARTIFACT_FILENAMES["position_figure"],
+    )
+    observations_csv = write_records_csv(
+        destination / "raw" / "position_observations.csv",
+        output.observations,
+    )
+    return (
+        results_csv,
+        figure_eps,
+        figure_eps.with_suffix(".png"),
+        observations_csv,
+    )

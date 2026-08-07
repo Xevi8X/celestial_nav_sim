@@ -1,1 +1,1 @@
-"""Independent experiments used by the article."""
+"""Functional experiments composed by :mod:`bin.experiments`."""

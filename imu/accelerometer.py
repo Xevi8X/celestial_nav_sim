@@ -96,8 +96,6 @@ class AccelerometerCalibration:
         consecutive_updates=1,
     ):
         self.fit = LinearFit(
-            4,
-            3,
             feature_scale=[Config.GRAVITY] * 3 + [1.0],
             max_condition_number=max_condition_number,
         )

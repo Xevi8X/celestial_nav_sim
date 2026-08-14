@@ -4,11 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 from PIL import Image
 
+from common import Sky
 from sky_render import (
     Camera,
     CameraGeometry,
@@ -19,6 +20,7 @@ from sky_render import (
 from sky_render.canvas import Canvas
 from sky_render.psf import (
     point_spread_kernel,
+    point_spread_kernels,
     point_spread_support,
     point_spread_taper_start,
 )
@@ -265,6 +267,72 @@ class RenderFormatTests(unittest.TestCase):
         outside = int(np.ceil(point_spread_support(fwhm))) + 1
         self.assertEqual(kernel[30, 30 + outside], 0.0)
 
+    def test_batched_point_spread_matches_scalar_kernels_exactly(self):
+        points = np.array([
+            [20.25, 19.75],
+            [0.01, 2.99],
+            [9.5, 8.5],
+        ])
+        fwhm = 3.4
+        size = int(np.ceil(point_spread_support(fwhm) + 1))
+        offsets = np.arange(-size, size + 1)
+        centers = np.floor(points).astype(np.int64)
+        x_coordinates = centers[:, 0, None] + offsets[None, :]
+        y_coordinates = centers[:, 1, None] + offsets[None, :]
+
+        batched = point_spread_kernels(
+            x_coordinates,
+            y_coordinates,
+            points[:, 0],
+            points[:, 1],
+            fwhm,
+        )
+
+        for index, point in enumerate(points):
+            xx, yy = np.meshgrid(
+                x_coordinates[index],
+                y_coordinates[index],
+            )
+            scalar = point_spread_kernel(
+                xx,
+                yy,
+                centroid_x=point[0],
+                centroid_y=point[1],
+                fwhm=fwhm,
+            )
+            np.testing.assert_array_equal(batched[index], scalar)
+
+    def test_batched_point_drawing_matches_scalar_across_formats(self):
+        base_positions = np.array([
+            [4.2, 3.1],
+            [0.01, 0.02],
+            [WIDTH - 0.01, HEIGHT - 0.01],
+            [4.2, 3.1],
+            [-30.0, 2.0],
+        ])
+        base_magnitudes = np.array([2.0, 4.0, 1.0, 6.0, 3.0])
+        positions = np.tile(base_positions, (60, 1))
+        magnitudes = np.tile(base_magnitudes, 60)
+        positions = np.vstack((positions, [np.nan, 1.0]))
+        magnitudes = np.append(magnitudes, 2.0)
+
+        for image_format in ImageFormat:
+            with self.subTest(image_format=image_format):
+                camera = make_camera(image_format)
+                camera.image_model.fwhm = 2.7
+                scalar = Canvas(camera)
+                batched = Canvas(camera)
+                for point, magnitude in zip(positions, magnitudes):
+                    scalar.draw(point, magnitude)
+                batched.draw_points(positions, magnitudes)
+
+                np.testing.assert_allclose(
+                    batched.linear_image(),
+                    scalar.linear_image(),
+                    rtol=2e-6,
+                    atol=2e-5,
+                )
+
     def test_horizon_mask_is_sharp_and_ground_background_is_scaled(self):
         camera = Camera(
             CameraGeometry(
@@ -301,6 +369,38 @@ class RenderFormatTests(unittest.TestCase):
 
         expected_background = np.where(ground, 16, 8).astype(np.uint8)
         np.testing.assert_array_equal(np.asarray(canvas.image()), expected_background)
+
+
+class SkyRenderingCoordinateTests(unittest.TestCase):
+    def test_rendering_sources_skip_optional_solar_system_deflectors(self):
+        sky = Sky.__new__(Sky)
+        sky._stars_info = [Sky.StarInfo(1, 2.0)]
+        sky._stars = object()
+        sky._bodies_info = [Sky.BodyInfo(10, "Sun", 1.0, -27.0)]
+        sky._bodies = [object()]
+        coordinates = np.array([[1.0, 2.0, 3.0]])
+        sky.objects_to_ecef = Mock(return_value=coordinates)
+        observer = SimpleNamespace(
+            time=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
+            latitude=52.0,
+            longitude=21.0,
+            elevation=100.0,
+        )
+
+        star_info, stars = sky.get_stars_ecef_for_rendering(observer)
+        body_info, bodies = sky.get_bodies_ecef_for_rendering(observer)
+
+        self.assertIs(star_info, sky._stars_info)
+        self.assertIs(body_info, sky._bodies_info)
+        np.testing.assert_array_equal(stars, coordinates)
+        np.testing.assert_array_equal(bodies, coordinates)
+        self.assertEqual(
+            sky.objects_to_ecef.call_args_list,
+            [
+                call(observer, sky._stars, deflectors=()),
+                call(observer, sky._bodies, deflectors=()),
+            ],
+        )
 
 
 if __name__ == "__main__":

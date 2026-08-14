@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
 
+from celestial_nav import Navigator
+from common import Config, Sky
 from imu import Accelerometer, AccelerometerCalibration, AccelerometerParameters
-from sky_render import Camera
+from sky_render import Camera, Renderer
 
 from .common import (
     Location,
+    body_from_camera_observer,
     body_from_ned,
-    noisy_attitude,
+    camera_observer_from_body,
     rotation_error_deg,
     seed,
     validate_simulation_settings,
@@ -21,6 +26,9 @@ from .common import (
 
 
 __all__ = ["Input", "Output", "run"]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _INITIAL_AZIMUTHS_DEG = (0.0, 90.0, 180.0, 270.0)
@@ -31,17 +39,18 @@ _AZIMUTH_AMPLITUDE_DEG = 15.0
 _ELEVATION_CENTER_DEG = 50.0
 _ELEVATION_AMPLITUDE_DEG = 30.0
 _ROLL_AMPLITUDE_DEG = 45.0
-_MATRIX_INDICATOR_LIMIT = 0.04
-_BIAS_INDICATOR_LIMIT = 0.30
-_MAXIMUM_CONDITION_NUMBER = 30.0
+_MATRIX_INDICATOR_LIMIT = 0.12
+_BIAS_INDICATOR_LIMIT = 1.2
+_MAXIMUM_CONDITION_NUMBER = np.inf
 _CONSECUTIVE_UPDATES = 3
-_MAXIMUM_OBSERVATIONS = 10000
+_MAXIMUM_OBSERVATIONS = 200
 
 
 @dataclass(frozen=True)
 class Input:
     camera: Camera
-    attitude_noise_std_deg: float
+    sky: Sky
+    camera_to_body: np.ndarray
     true_parameters: AccelerometerParameters
     locations: tuple[Location, ...]
     repetitions: int
@@ -60,11 +69,15 @@ def _validate_input(value: Input) -> None:
         raise TypeError("input must be an accelerometer calibration Input")
     validate_simulation_settings(
         value.camera,
-        value.attitude_noise_std_deg,
         value.locations,
         value.repetitions,
         value.random_seed,
     )
+    if not isinstance(value.sky, Sky):
+        raise TypeError("sky must be a Sky")
+    camera_to_body = np.asarray(value.camera_to_body)
+    if camera_to_body.shape != (3, 3) or not np.isfinite(camera_to_body).all():
+        raise ValueError("camera_to_body must be a finite 3x3 matrix")
     if not isinstance(value.true_parameters, AccelerometerParameters):
         raise TypeError("true_parameters must be AccelerometerParameters")
     parameter_values = (
@@ -109,9 +122,22 @@ def run(input: Input) -> Output:
     updates = []
     models = {}
 
+    fov = input.camera.geometry.fov
+    fov_range = (max(1, round(fov) - 2), min(179, round(fov) + 2))
+    navigator = Navigator(input.sky, fov_range=fov_range)
+    renderer = Renderer(input.sky, input.camera)
+
     for repetition in range(input.repetitions):
         for location in input.locations:
             for initial_azimuth in _INITIAL_AZIMUTHS_DEG:
+                LOGGER.info(
+                    "Accelerometer calibration: %s, repetition %d/%d, "
+                    "initial azimuth %.0f deg",
+                    location.name,
+                    repetition + 1,
+                    input.repetitions,
+                    initial_azimuth,
+                )
                 run_seed = seed(
                     input.random_seed,
                     "accelerometer",
@@ -129,9 +155,13 @@ def run(input: Input) -> Output:
                 elapsed = 0.0
                 estimate = None
                 exposure_s = input.camera.image_model.exposure_time
+                rejected_observations = 0
 
                 for observation in range(_MAXIMUM_OBSERVATIONS):
                     time_s = observation * exposure_s
+                    timestamp = location.observation_time + dt.timedelta(
+                        seconds=time_s
+                    )
                     roll, elevation, azimuth = _maneuver_pose(
                         time_s,
                         initial_azimuth,
@@ -142,20 +172,71 @@ def run(input: Input) -> Output:
                         azimuth,
                     )
                     reading = sensor.measure(actual_attitude)
-                    reference_attitude = noisy_attitude(
+
+                    observer = camera_observer_from_body(
                         actual_attitude,
-                        seed(
-                            input.random_seed,
-                            run_seed,
-                            observation,
-                            "attitude",
-                        ),
-                        input.attitude_noise_std_deg,
+                        input.camera_to_body,
+                        location,
+                        timestamp,
                     )
-                    estimate = calibration.update(reference_attitude, reading)
+                    render_seed = seed(
+                        input.random_seed, run_seed, observation, "render"
+                    )
+                    tic = dt.datetime.now()
+                    image = renderer.render(observer, noise_seed=render_seed)
+                    render_time = dt.datetime.now() - tic
+                    estimated_observer = navigator.estimate_orientation(
+                        image,
+                        timestamp,
+                        location.latitude_deg,
+                        location.longitude_deg,
+                        location.elevation_m,
+                    )
+                    plate_solving_time = dt.datetime.now() - tic - render_time
+                    LOGGER.debug(
+                        "Render %.1f ms; plate solve %.1f ms",
+                        render_time.total_seconds() * 1000.0,
+                        plate_solving_time.total_seconds() * 1000.0,
+                    )
+
+                    accepted = estimated_observer.observer_matrix is not None
                     elapsed = time_s + exposure_s
 
+                    if accepted:
+                        reference_attitude = body_from_camera_observer(
+                            estimated_observer, input.camera_to_body
+                        )
+                        estimate = calibration.update(reference_attitude, reading)
+                    else:
+                        rejected_observations += 1
+
+                    indicators = calibration.indicators
                     condition_number = calibration.condition_number
+
+                    valid_indicators = (
+                        indicators is not None
+                        and len(indicators) == 4
+                        and np.all(np.isfinite(indicators))
+                    )
+                    if valid_indicators:
+                        LOGGER.debug(
+                            "Indicators: %s",
+                            ", ".join(f"{value:.3f}" for value in indicators),
+                        )
+                        i = {
+                            "i1": float(indicators[0]),
+                            "i2": float(indicators[1]),
+                            "i3": float(indicators[2]),
+                            "i4": float(indicators[3]),
+                        }
+                    else:
+                        i = {
+                            "i1": None,
+                            "i2": None,
+                            "i3": None,
+                            "i4": None,
+                        }
+
                     updates.append({
                         "location": location.name,
                         "repetition": repetition,
@@ -165,8 +246,9 @@ def run(input: Input) -> Output:
                         "roll_deg": roll,
                         "camera_elevation_deg": elevation,
                         "camera_azimuth_deg": azimuth,
-                        "accepted": True,
+                        "accepted": accepted,
                         "initialized": calibration.initialized,
+                        **i,
                         "converged": calibration.converged,
                         "condition_number": (
                             condition_number
@@ -174,8 +256,29 @@ def run(input: Input) -> Output:
                         ),
                         "stable_updates": calibration.stable_updates,
                     })
+
+                    completed = observation + 1
+                    if (
+                        completed == 1
+                        or completed % 10 == 0
+                        or calibration.converged
+                    ):
+                        LOGGER.info(
+                            "Accelerometer calibration %s/%.0f deg: "
+                            "%d/%d samples, %d accepted, %d rejected",
+                            location.name,
+                            initial_azimuth,
+                            completed,
+                            _MAXIMUM_OBSERVATIONS,
+                            calibration.fit.count,
+                            rejected_observations,
+                        )
                     if calibration.converged:
-                        print("Converged after", observation, "observations")
+                        LOGGER.info(
+                            "Accelerometer calibration converged after %d "
+                            "accepted samples",
+                            calibration.fit.count,
+                        )
                         break
 
                 initialized = calibration.initialized and estimate is not None
@@ -184,17 +287,15 @@ def run(input: Input) -> Output:
                         actual.assembly_matrix,
                         estimate.assembly_matrix,
                     )
-                    scale_error = float(np.sqrt(np.mean(np.square(
-                        100.0
-                        * (estimate.axis_scale - actual.axis_scale)
-                        / actual.axis_scale
+                    scale_rmse = float(np.sqrt(np.mean(np.square(
+                        estimate.axis_scale - actual.axis_scale
                     ))))
                     bias_error = float(np.linalg.norm(
                         estimate.bias - actual.bias
                     ))
                 else:
                     rotation_error = None
-                    scale_error = None
+                    scale_rmse = None
                     bias_error = None
 
                 if calibration.converged:
@@ -209,11 +310,10 @@ def run(input: Input) -> Output:
                     "repetition": repetition,
                     "azimuth_deg": initial_azimuth,
                     "rotation_error_deg": rotation_error,
-                    "scale_error_percent": scale_error,
+                    "scale_rmse": scale_rmse,
                     "bias_error_mps2": bias_error,
-                    "calibration_time_s": elapsed,
                     "accepted_observations": calibration.fit.count,
-                    "rejected_observations": 0,
+                    "rejected_observations": rejected_observations,
                     "status": status,
                     "true_rotation": actual.assembly_matrix.tolist(),
                     "estimated_rotation": (

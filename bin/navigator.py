@@ -4,10 +4,19 @@ from common.ecef import ECEF
 from sky_render import Camera, CameraGeometry, ImageFormat, render
 
 import datetime
+import logging
 import matplotlib.pyplot as plt
 import numpy as np
 
-if __name__ == "__main__": 
+
+LOGGER = logging.getLogger(__name__)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     sky = Sky()
     camera = Camera(
         CameraGeometry(
@@ -32,15 +41,19 @@ if __name__ == "__main__":
 
     navigator = Navigator(sky, fov_range=(30, 40), star_max_magnitude=7)
     solution = navigator.find_solution(image)
-    print(solution)
+    LOGGER.info("Plate solution: %s", solution)
     plt.imshow(solution.visual)
     plt.axis("off")
     plt.show()
 
     observer2 = navigator.estimate_orientation(image, time=observer.time, latitude_deg=observer.latitude, longitude_deg=observer.longitude, elevation_m=observer.elevation)
 
-    print("Actual orientation: ", observer.look_dir, observer.look_up)
-    print("Estimated orientation: ", observer2.look_dir, observer2.look_up)
+    LOGGER.info("Actual orientation: %s %s", observer.look_dir, observer.look_up)
+    LOGGER.info(
+        "Estimated orientation: %s %s",
+        observer2.look_dir,
+        observer2.look_up,
+    )
 
     image_time_orientation = navigator.ImageTimeOrientation(
         image=image,
@@ -50,9 +63,19 @@ if __name__ == "__main__":
     )
     location = navigator.estimate_location_full_orientation(image_time_orientation)
 
-    print("Actual location: ", observer.latitude, observer.longitude)
-    print("Estimated location: ", location.latitude_deg, location.longitude_deg)
-    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location.latitude_deg, location.longitude_deg)), "m")
+    distance = np.linalg.norm(ECEF.north_east_vector(
+        observer.latitude,
+        observer.longitude,
+        location.latitude_deg,
+        location.longitude_deg,
+    ))
+    LOGGER.info("Actual location: %.6f, %.6f", observer.latitude, observer.longitude)
+    LOGGER.info(
+        "Estimated location: %.6f, %.6f (error %.1f m)",
+        location.latitude_deg,
+        location.longitude_deg,
+        distance,
+    )
 
     image_time_zenit = navigator.ImageTimeZenit(
         image=image,
@@ -61,7 +84,17 @@ if __name__ == "__main__":
     )
     location = navigator.estimate_location(image_time_zenit)
 
-    print("Estimated location from zenit: ", location.latitude_deg, location.longitude_deg)
-    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location.latitude_deg, location.longitude_deg)), "m")
+    distance = np.linalg.norm(ECEF.north_east_vector(
+        observer.latitude,
+        observer.longitude,
+        location.latitude_deg,
+        location.longitude_deg,
+    ))
+    LOGGER.info(
+        "Estimated zenith location: %.6f, %.6f (error %.1f m)",
+        location.latitude_deg,
+        location.longitude_deg,
+        distance,
+    )
  
     

@@ -1,4 +1,5 @@
 import datetime
+import logging
 import numpy as np
 
 from celestial_nav import Navigator
@@ -29,6 +30,9 @@ ROLL_AMPLITUDE = 60.0
 MATRIX_STDDEV_LIMIT = 0.01
 BIAS_STDDEV_LIMIT = 0.02
 CONDITION_NUMBER_LIMIT = 30.0
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def find_star(sky, observer):
@@ -68,6 +72,10 @@ def rotate_observer(time_s):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     sky = Sky()
     start_time = datetime.datetime(
         2026,
@@ -136,7 +144,7 @@ def main():
         )
 
         if orientation.observer_matrix is None:
-            print("No solution")
+            LOGGER.warning("No plate solution for sample %d", sample + 1)
             stable_samples = 0
             continue
 
@@ -158,10 +166,17 @@ def main():
         matrix_stddev = np.sqrt(variance[:3]).max()
         bias_stddev = np.sqrt(variance[3]).max()
 
-        print(
-            f"{time_s:.1f},{roll:.1f},{pitch:.1f},{azimuth:.1f},"
-            f"{matrix_stddev:.6f},{bias_stddev:.6f},"
-            f"{condition_number:.3f}"
+        LOGGER.info(
+            "sample=%d time=%.1f roll=%.1f pitch=%.1f azimuth=%.1f "
+            "matrix_stddev=%.6f bias_stddev=%.6f condition=%.3f",
+            sample + 1,
+            time_s,
+            roll,
+            pitch,
+            azimuth,
+            matrix_stddev,
+            bias_stddev,
+            condition_number,
         )
 
         if (
@@ -174,26 +189,26 @@ def main():
             stable_samples = 0
 
         if stable_samples == 3:
-            elapsed = (sample + 1) * EXPOSURE_TIME
             break
 
         if (sample + 1) % 100 == 0:
-            print(
-                f"{(sample + 1) * EXPOSURE_TIME:.1f} s: "
-                f"{solved_exposures}/{sample + 1} images solved"
+            LOGGER.info(
+                "%d/%d images solved",
+                solved_exposures,
+                sample + 1,
             )
     else:
         raise RuntimeError("calibration did not converge")
 
     np.set_printoptions(precision=6, suppress=True)
-    print(f"Calibration time: {elapsed:.1f} s ({sample + 1} exposures)")
-    print(f"Plate solutions: {solved_exposures}/{sample + 1}")
-    print("Actual scale:   ", actual.axis_scale)
-    print("Estimated scale:", estimated.axis_scale)
-    print("Actual bias:    ", actual.bias)
-    print("Estimated bias: ", estimated.bias)
-    print("Actual noise:   ", actual.noise_stddev)
-    print("Estimated noise:", estimated.noise_stddev)
+    LOGGER.info("Samples used: %d", solved_exposures)
+    LOGGER.info("Plate solutions: %d/%d", solved_exposures, sample + 1)
+    LOGGER.info("Actual scale: %s", actual.axis_scale)
+    LOGGER.info("Estimated scale: %s", estimated.axis_scale)
+    LOGGER.info("Actual bias: %s", actual.bias)
+    LOGGER.info("Estimated bias: %s", estimated.bias)
+    LOGGER.info("Actual noise: %s", actual.noise_stddev)
+    LOGGER.info("Estimated noise: %s", estimated.noise_stddev)
 
 
 if __name__ == "__main__":

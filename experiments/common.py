@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 from dataclasses import dataclass
-from numbers import Integral, Real
+from numbers import Integral
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -21,7 +21,7 @@ __all__ = [
     "body_from_camera_observer",
     "body_from_ned",
     "camera_observer_from_body",
-    "noisy_attitude",
+    "render_and_solve_body_attitude",
     "rotation_error_deg",
     "seed",
     "validate_simulation_settings",
@@ -39,7 +39,6 @@ class Location:
 
 def validate_simulation_settings(
     camera: Camera,
-    attitude_noise_std_deg: float,
     locations: tuple[Location, ...],
     repetitions: int,
     random_seed: int,
@@ -48,15 +47,6 @@ def validate_simulation_settings(
 
     if not isinstance(camera, Camera) or not camera.is_valid():
         raise ValueError("camera must contain valid tuned settings")
-    if (
-        isinstance(attitude_noise_std_deg, bool)
-        or not isinstance(attitude_noise_std_deg, Real)
-        or not np.isfinite(attitude_noise_std_deg)
-        or attitude_noise_std_deg < 0.0
-    ):
-        raise ValueError(
-            "attitude_noise_std_deg must be finite and non-negative"
-        )
     if not isinstance(locations, tuple) or not locations:
         raise ValueError("locations must be a non-empty tuple")
     if not all(isinstance(location, Location) for location in locations):
@@ -133,16 +123,32 @@ def body_from_camera_observer(
     return camera_to_body @ navigation_to_camera
 
 
-def noisy_attitude(
-    actual: np.ndarray,
-    random_seed: int,
-    standard_deviation_deg: float,
-) -> np.ndarray:
-    rng = np.random.default_rng(random_seed)
-    error = Rotation.from_rotvec(
-        rng.normal(0.0, np.radians(standard_deviation_deg), size=3)
-    ).as_matrix()
-    return error @ actual
+def render_and_solve_body_attitude(
+    renderer,
+    navigator,
+    camera_to_body,
+    location,
+    timestamp,
+    actual_attitude,
+    noise_seed,
+):
+    observer = camera_observer_from_body(
+        actual_attitude,
+        camera_to_body,
+        location,
+        timestamp,
+    )
+    image = renderer.render(observer, noise_seed=noise_seed)
+    estimated_observer = navigator.estimate_orientation(
+        image,
+        timestamp,
+        location.latitude_deg,
+        location.longitude_deg,
+        location.elevation_m,
+    )
+    if estimated_observer.observer_matrix is None:
+        return None
+    return body_from_camera_observer(estimated_observer, camera_to_body)
 
 
 def assembly_rotation(angles_deg) -> np.ndarray:

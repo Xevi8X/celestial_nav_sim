@@ -157,12 +157,18 @@ class Camera:
             raise ValueError("observer_matrix must have shape (3, 3)")
 
         geometry = self.geometry
-        yy, xx = np.indices(
-            (geometry.height, geometry.width),
-            dtype=np.float64,
+        focal_length = self.focal_length
+        center_x = (geometry.width - 1) / 2
+        center_y = (geometry.height - 1) / 2
+        camera_x = (
+            np.arange(geometry.width, dtype=np.float64) - center_x
+        ) / focal_length
+        camera_y = (
+            center_y - np.arange(geometry.height, dtype=np.float64)
+        ) / focal_length
+        ray_down = (
+            camera_x[None, :] * observer_matrix[0, 2]
+            + camera_y[:, None] * observer_matrix[1, 2]
+            + observer_matrix[2, 2]
         )
-        pixels = np.stack((xx, yy, np.ones_like(xx)), axis=-1)
-        rays_camera = pixels @ np.linalg.inv(self.camera_matrix).T
-        rays_ned = rays_camera @ observer_matrix
-
-        return rays_ned[:, :, 2] > 0
+        return ray_down > 0

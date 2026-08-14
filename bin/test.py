@@ -1,11 +1,19 @@
 
+import logging
 from pathlib import Path
 from common import Io, Sky
 
-from tools import Calibrator
+from sky_render import Calibrator
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     path = Path(__file__).parent.parent / ".data" / "image.fit"
     data = Io.load_fits(path)
 
@@ -24,6 +32,6 @@ if __name__ == "__main__":
     )
 
     for report in calibrator.last_reports:
-        print(report)
-    print(observer)
-    print(camera)
+        LOGGER.info("%s", report)
+    LOGGER.info("Observer: %s", observer)
+    LOGGER.info("Camera: %s", camera)

@@ -70,9 +70,9 @@ CSV_SCHEMAS = MappingProxyType(
             "location",
             "azimuth_deg",
             "rotation_error_deg",
-            "scale_error_percent",
+            "scale_rmse",
             "bias_error_mps2",
-            "calibration_time_s",
+            "accepted_observations",
             "status",
         ),
         "magnetometer_results": (
@@ -216,13 +216,19 @@ def write_records_csv(
             lineterminator="\n",
         )
         writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {
-                    field: _csv_value(row.get(field), float_precision)
-                    for field in fields
-                }
-            )
+        for row_index, row in enumerate(rows):
+            values = {}
+            for field in fields:
+                try:
+                    values[field] = _csv_value(
+                        row.get(field),
+                        float_precision,
+                    )
+                except (TypeError, ValueError) as error:
+                    raise type(error)(
+                        f"record {row_index}, field {field!r}: {error}"
+                    ) from error
+            writer.writerow(values)
     return destination
 
 
@@ -336,6 +342,11 @@ def _add_grid(axis: Any) -> None:
     axis.grid()
 
 
+_LINE_STYLES = ("-", "--", ":", "-.")
+_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*")
+_HATCHES = ("...", "///", "xxx", "+++")
+
+
 def plot_renderer_histograms(
     records: Iterable[Mapping[str, Any]],
     path: str | Path,
@@ -367,7 +378,7 @@ def plot_renderer_histograms(
         sharey=True,
     )[0]
     for axis, image_id in zip(axes, image_ids):
-        for series_name in series:
+        for series_index, series_name in enumerate(series):
             selected = [
                 row
                 for row in rows
@@ -381,6 +392,9 @@ def plot_renderer_histograms(
                     x_values,
                     y_values,
                     label=str(series_name),
+                    linestyle=_LINE_STYLES[
+                        series_index % len(_LINE_STYLES)
+                    ],
                 )
         axis.set_title(str(image_id))
         axis.set_xlabel("Pixel intensity")
@@ -393,9 +407,9 @@ def plot_renderer_histograms(
 _ACCELEROMETER_METRICS = MappingProxyType(
     {
         "rotation_error_deg": "Rotation error (deg)",
-        "scale_error_percent": "Scale error (%)",
+        "scale_rmse": "Scale-factor RMSE (-)",
         "bias_error_mps2": "Bias error (m/s²)",
-        "calibration_time_s": "Calibration time (s)",
+        "accepted_observations": "Samples used",
     }
 )
 
@@ -408,7 +422,7 @@ def plot_accelerometer_results(
     location_field: str = "location",
     azimuth_field: str = "azimuth_deg",
 ) -> Path:
-    """Plot calibration errors and duration for every location and azimuth.
+    """Plot calibration errors and sample counts by location and azimuth.
 
     Repeated records for one location/azimuth pair are represented by their
     arithmetic mean.  Missing or non-finite metric values are omitted.
@@ -434,14 +448,11 @@ def plot_accelerometer_results(
         _ordered_unique(row[azimuth_field] for row in rows),
         key=float,
     )
-    figure = Figure(
-        figsize=(3.0 * len(metrics), 3.0),
-        constrained_layout=True,
-    )
-    axes = figure.subplots(1, len(metrics), squeeze=False)[0]
+    figure = Figure(figsize=(7.2, 5.4), constrained_layout=True)
+    axes = figure.subplots(2, 2, squeeze=False).ravel()
     x_values = np.arange(len(locations))
     for axis, (field, label) in zip(axes, metrics.items()):
-        for azimuth in azimuths:
+        for azimuth_index, azimuth in enumerate(azimuths):
             values = []
             for location in locations:
                 selected = [
@@ -455,11 +466,14 @@ def plot_accelerometer_results(
                 x_values,
                 values,
                 label=f"{float(azimuth):g}°",
+                marker=_MARKERS[azimuth_index % len(_MARKERS)],
             )
         axis.set_ylabel(label)
         axis.set_xticks(x_values, [str(location) for location in locations])
         axis.tick_params(axis="x", labelrotation=20, labelsize=8)
         _add_grid(axis)
+    for axis in axes[len(metrics):]:
+        axis.set_visible(False)
     _legend_below(figure, axes[0], title="Initial azimuth")
     return _save_vector_eps(figure, path)
 
@@ -473,7 +487,7 @@ def plot_magnetometer_results(
     vector_error_field: str = "vector_error_ut",
     heading_error_field: str = "heading_error_deg",
 ) -> Path:
-    """Plot complete-pattern and constrained-turn precision by location."""
+    """Plot baseline and calibrated magnetometer errors by location."""
 
     rows = _materialize_records(records)
     if not rows:
@@ -513,6 +527,9 @@ def plot_magnetometer_results(
                 values,
                 width=width,
                 label=str(procedure),
+                hatch=_HATCHES[index % len(_HATCHES)],
+                edgecolor="black",
+                linewidth=0.8,
             )
         axis.set_ylabel(ylabel)
         axis.set_xticks(x_values, [str(location) for location in locations])
@@ -530,7 +547,7 @@ def plot_position_results(
     individual_field: str = "individual_image_mean_error_m",
     sequence_field: str = "four_pose_error_m",
 ) -> Path:
-    """Plot mean individual-image error against the combined estimate."""
+    """Plot calibrated mean and combined errors on independent scales."""
 
     rows = _materialize_records(records)
     if not rows:
@@ -538,34 +555,35 @@ def plot_position_results(
     _require_fields(rows, (location_field, individual_field, sequence_field))
     locations = _ordered_unique(row[location_field] for row in rows)
     x_values = np.arange(len(locations), dtype=float)
-    width = 0.36
-    individual = [
-        _mean((row for row in rows if row[location_field] == location), individual_field)
-        for location in locations
-    ]
-    sequence = [
-        _mean((row for row in rows if row[location_field] == location), sequence_field)
-        for location in locations
-    ]
     figure = Figure(figsize=(7.2, 3.2), constrained_layout=True)
-    axis = figure.subplots(1, 1)
-    axis.bar(
-        x_values - width / 2,
-        individual,
-        width,
-        label="Mean individual-image error",
-    )
-    axis.bar(
-        x_values + width / 2,
-        sequence,
-        width,
-        label="Combined 60 s",
-    )
-    axis.set_ylabel("Position error (m)")
-    axis.set_xticks(x_values, [str(location) for location in locations])
-    axis.tick_params(axis="x", labelrotation=20, labelsize=8)
-    _add_grid(axis)
-    _legend_below(figure, axis)
+    axes = np.asarray(figure.subplots(1, 2, squeeze=False))[0]
+    for axis, field, title in (
+        (axes[0], individual_field, "Mean individual-image error"),
+        (axes[1], sequence_field, "Combined 100-sample error"),
+    ):
+        values = [
+            _mean(
+                (row for row in rows if row[location_field] == location),
+                field,
+            )
+            for location in locations
+        ]
+        bars = axis.bar(
+            x_values,
+            values,
+            width=0.7,
+            color=[f"C{index % 10}" for index in range(len(locations))],
+            edgecolor="black",
+            linewidth=0.8,
+        )
+        for index, bar in enumerate(bars):
+            bar.set_hatch(_HATCHES[index % len(_HATCHES)])
+        axis.set_title(title)
+        axis.set_ylabel("Position error (m)")
+        axis.set_xticks(x_values, [str(location) for location in locations])
+        axis.tick_params(axis="x", labelrotation=20, labelsize=8)
+        axis.set_ylim(bottom=0)
+        _add_grid(axis)
     return _save_vector_eps(figure, path)
 
 

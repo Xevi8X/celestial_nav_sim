@@ -119,6 +119,35 @@ class CameraLifecycleTests(unittest.TestCase):
             ]),
         )
 
+    def test_ground_mask_matches_full_ray_projection(self):
+        rng = np.random.default_rng(123)
+        matrices = [np.eye(3), np.diag([1.0, -1.0, -1.0])]
+        for _ in range(12):
+            matrix, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+            matrices.append(matrix)
+
+        for width, height in ((4, 4), (5, 3), (32, 24)):
+            camera = Camera(
+                CameraGeometry(fov=73.0, width=width, height=height),
+            )
+            yy, xx = np.indices((height, width), dtype=np.float64)
+            pixels = np.stack((xx, yy, np.ones_like(xx)), axis=-1)
+            rays_camera = pixels @ np.linalg.inv(camera.camera_matrix).T
+
+            for observer_matrix in matrices:
+                with self.subTest(
+                    width=width,
+                    height=height,
+                    observer_matrix=observer_matrix,
+                ):
+                    expected = (
+                        rays_camera @ observer_matrix
+                    )[:, :, 2] > 0
+                    np.testing.assert_array_equal(
+                        camera.ground_mask(observer_matrix),
+                        expected,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

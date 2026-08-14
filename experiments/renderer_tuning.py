@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,11 +11,22 @@ import numpy as np
 from PIL import Image
 
 from common import ImageData, Io, Observer, Sky
-from sky_render import Camera, CameraGeometry, CameraImageModel, Renderer
-from tools import CalibrationConfig, CalibrationError, Calibrator, StepReport
+from sky_render import (
+    CalibrationConfig,
+    CalibrationError,
+    Camera,
+    CameraGeometry,
+    CameraImageModel,
+    Calibrator,
+    Renderer,
+    StepReport,
+)
 
 
 __all__ = ["Input", "Output", "run"]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -230,6 +242,7 @@ def run(input: Input) -> Output:
     reports: list[tuple[StepReport, ...]] = []
     first_fov: float | None = None
     for index, photo in enumerate(records, start=1):
+        LOGGER.info("Tuning renderer from image %d/%d", index, len(records))
         observer, camera, photo_reports = _fit_photo(
             photo,
             f"Image {index}",

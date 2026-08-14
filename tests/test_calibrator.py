@@ -7,18 +7,16 @@ from PIL import Image
 from celestial_nav import LostInSpace
 from common import Observer, Sky
 from sky_render import (
-    Camera,
-    CameraGeometry,
-    CameraImageModel,
-    ImageFormat,
-)
-from tools import (
     CalibrationConfig,
     CalibrationContext,
     CalibrationError,
     CalibrationStep,
     CalibrationVisualizer,
+    Camera,
+    CameraGeometry,
+    CameraImageModel,
     Calibrator,
+    ImageFormat,
     StarMeasurement,
     otsu_threshold,
 )

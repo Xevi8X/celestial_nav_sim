@@ -90,23 +90,17 @@ class MagnetometerCalibration:
 
         if constrained:
             self.horizontal_fit = LinearFit(
-                3,
-                2,
-                [reference_scale_ut, reference_scale_ut, 1.0],
-                max_condition_number,
+                feature_scale=[reference_scale_ut, reference_scale_ut, 1.0],
+                max_condition_number=max_condition_number,
             )
             self.vertical_fit = LinearFit(
-                3,
-                1,
-                [reference_scale_ut] * 3,
-                max_condition_number,
+                feature_scale=[reference_scale_ut] * 3,
+                max_condition_number=max_condition_number,
             )
         else:
             self.fit = LinearFit(
-                4,
-                3,
-                [reference_scale_ut] * 3 + [1.0],
-                max_condition_number,
+                feature_scale=[reference_scale_ut] * 3 + [1.0],
+                max_condition_number=max_condition_number,
             )
 
     @property

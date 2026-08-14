@@ -23,10 +23,10 @@ from scipy.optimize import least_squares, minimize_scalar
 
 from celestial_nav import LostInSpace
 from common import ECEF, Observer, Sky
-from sky_render import Camera, ImageFormat, Renderer
-from sky_render.psf import point_spread_kernel, source_mask_radius
-
 from .calibration_visualization import CalibrationVisualizer
+from .camera import Camera, ImageFormat
+from .psf import point_spread_kernel, source_mask_radius
+from .render import Renderer
 
 
 CalibrationPair = Tuple[Observer, Camera]
@@ -64,11 +64,11 @@ class CalibrationConfig:
     rough_min_fov: float = 5.0
     rough_max_fov: float = 120.0
     rough_star_max_magnitude: float = 7.0
-    rough_distortion_bounds: Tuple[float, float] = (-0.5, 0.5)
+    rough_distortion_bounds: Tuple[float, float] = (-0.3, 0.3)
 
     refined_fov_tolerance: float = 2.0
     refined_star_max_magnitude: float = 10.0
-    refined_distortion_bounds: Tuple[float, float] = (-0.2, 0.2)
+    refined_distortion_bounds: Tuple[float, float] = (-0.1, 0.1)
     minimum_matches: int = 6
     maximum_false_positive_probability: float = 1e-3
     maximum_astrometric_rmse_px: float = 1.5

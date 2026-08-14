@@ -10,10 +10,19 @@ from sky_render import (
 )
 
 import datetime
+import logging
 import matplotlib.pyplot as plt
 import numpy as np
 
-if __name__ == "__main__": 
+
+LOGGER = logging.getLogger(__name__)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     sky = Sky()
     camera = Camera(
         CameraGeometry(
@@ -50,8 +59,28 @@ if __name__ == "__main__":
     location2 = navigator.estimate_location(data[0])
 
 
-    print("Estimated location from zenit: ", location.latitude_deg, location.longitude_deg)
-    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location.latitude_deg, location.longitude_deg)), "m")
+    distance = np.linalg.norm(ECEF.north_east_vector(
+        observer.latitude,
+        observer.longitude,
+        location.latitude_deg,
+        location.longitude_deg,
+    ))
+    LOGGER.info(
+        "Estimated multi-image location: %.6f, %.6f (error %.1f m)",
+        location.latitude_deg,
+        location.longitude_deg,
+        distance,
+    )
 
-    print("Estimated location2 from zenit: ", location2.latitude_deg, location2.longitude_deg)
-    print("Dist: ", np.linalg.norm(ECEF.north_east_vector(observer.latitude, observer.longitude, location2.latitude_deg, location2.longitude_deg)), "m")
+    distance2 = np.linalg.norm(ECEF.north_east_vector(
+        observer.latitude,
+        observer.longitude,
+        location2.latitude_deg,
+        location2.longitude_deg,
+    ))
+    LOGGER.info(
+        "Estimated single-image location: %.6f, %.6f (error %.1f m)",
+        location2.latitude_deg,
+        location2.longitude_deg,
+        distance2,
+    )

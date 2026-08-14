@@ -37,8 +37,18 @@ class Renderer:
         observer: Observer,
         exposure_time: float,
     ):
-        stars_info, stars_ned = self._sky.get_stars_ecef(observer)
-        bodies_info, bodies_ned = self._sky.get_bodies_ecef(observer)
+        get_render_stars = getattr(
+            self._sky,
+            "get_stars_ecef_for_rendering",
+            self._sky.get_stars_ecef,
+        )
+        stars_info, stars_ned = get_render_stars(observer)
+        get_render_bodies = getattr(
+            self._sky,
+            "get_bodies_ecef_for_rendering",
+            self._sky.get_bodies_ecef,
+        )
+        bodies_info, bodies_ned = get_render_bodies(observer)
 
         ecef_to_ned = ECEF.ecef_to_ned(observer.latitude, observer.longitude)
         stars_ned = stars_ned @ ecef_to_ned.T
@@ -67,11 +77,19 @@ class Renderer:
         stars_visible = visible(stars_ned, star_xy, star_z)
         bodies_visible = visible(bodies_ned, body_xy, body_z)
 
-        for point, info in zip(
-            star_xy[stars_visible],
-            np.asarray(stars_info, dtype=object)[stars_visible],
-        ):
-            canvas.draw(point, info.magnitude, exposure_time=exposure_time)
+        visible_star_indices = np.flatnonzero(stars_visible)
+        canvas.draw_points(
+            star_xy[visible_star_indices],
+            np.fromiter(
+                (
+                    stars_info[index].magnitude
+                    for index in visible_star_indices
+                ),
+                dtype=np.float64,
+                count=len(visible_star_indices),
+            ),
+            exposure_time=exposure_time,
+        )
 
         for point, vector, info in zip(
             body_xy[bodies_visible],

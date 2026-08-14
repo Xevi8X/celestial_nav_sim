@@ -52,13 +52,51 @@ class Sky:
         self._stars_info = [Sky.StarInfo(int(i), float(row["magnitude"])) for i, row in frame.iterrows()]
         self._stars = Star.from_dataframe(frame)
 
-    def _get_observer_spacetime(self, observer: Observer):
-        observer_location = wgs84.latlon(observer.latitude, observer.longitude, elevation_m=observer.elevation)
-        return (self._earth + observer_location).at(self._timescale.from_datetime(observer.time))
+        # Celestial coordinates depend on spacetime, not camera attitude.
+        # Reuse this setup between stars and bodies within one render.
+        self._observer_spacetime_cache = None
 
-    def _get_vector_to_object(self, observer: Observer, obj):
-        observer_spacetime = self._get_observer_spacetime(observer)
-        apparent = observer_spacetime.observe(obj).apparent()
+    @staticmethod
+    def _observer_key(observer: Observer):
+        return (
+            observer.time,
+            observer.latitude,
+            observer.longitude,
+            observer.elevation,
+        )
+
+    def _get_observer_spacetime(self, observer: Observer):
+        key = self._observer_key(observer)
+        cache = self._observer_spacetime_cache
+        if cache is not None and key == cache[0]:
+            return cache[1]
+        observer_location = wgs84.latlon(
+            observer.latitude,
+            observer.longitude,
+            elevation_m=observer.elevation,
+        )
+        observer_spacetime = (
+            self._earth + observer_location
+        ).at(self._timescale.from_datetime(observer.time))
+        self._observer_spacetime_cache = (key, observer_spacetime)
+        return observer_spacetime
+
+    def _get_vector_to_object(
+        self,
+        observer: Observer,
+        obj,
+        observer_spacetime=None,
+        ecef_to_ned=None,
+        deflectors=None,
+    ):
+        if observer_spacetime is None:
+            observer_spacetime = self._get_observer_spacetime(observer)
+        astrometric = observer_spacetime.observe(obj)
+        apparent = (
+            astrometric.apparent()
+            if deflectors is None
+            else astrometric.apparent(deflectors=deflectors)
+        )
         alt, az, distance = apparent.altaz('standard')
 
         alt = alt.radians
@@ -70,13 +108,37 @@ class Sky:
             -np.sin(alt)
         ])
 
-        ecef_to_ned = ECEF.ecef_to_ned(observer.latitude, observer.longitude)
+        if ecef_to_ned is None:
+            ecef_to_ned = ECEF.ecef_to_ned(
+                observer.latitude,
+                observer.longitude,
+            )
         return ecef_to_ned.T @ ned * distance.km
 
-    def objects_to_ecef(self, observer : Observer, objects):
+    def objects_to_ecef(self, observer : Observer, objects, deflectors=None):
         if isinstance(objects, list):
-            return np.array([self._get_vector_to_object(observer, obj) for obj in objects])
-        return np.asarray(self._get_vector_to_object(observer, objects)).T
+            observer_spacetime = self._get_observer_spacetime(observer)
+            ecef_to_ned = ECEF.ecef_to_ned(
+                observer.latitude,
+                observer.longitude,
+            )
+            return np.array([
+                self._get_vector_to_object(
+                    observer,
+                    obj,
+                    observer_spacetime,
+                    ecef_to_ned,
+                    deflectors,
+                )
+                for obj in objects
+            ])
+        return np.asarray(
+            self._get_vector_to_object(
+                observer,
+                objects,
+                deflectors=deflectors,
+            )
+        ).T
     
     def radec_to_ecef(self, observer, ra, dec, roll = 0.0):
         ra, dec, roll = np.radians([ra, dec, roll])
@@ -105,6 +167,28 @@ class Sky:
 
     def get_stars_ecef(self, observer : Observer) -> tuple[list[StarInfo], np.ndarray]:
         return self._stars_info, self.objects_to_ecef(observer, self._stars)
+
+    def get_stars_ecef_for_rendering(
+        self,
+        observer: Observer,
+    ) -> tuple[list[StarInfo], np.ndarray]:
+        """Return fast apparent stars without Sun/Jupiter/Saturn deflection."""
+        return self._stars_info, self.objects_to_ecef(
+            observer,
+            self._stars,
+            deflectors=(),
+        )
     
     def get_bodies_ecef(self, observer : Observer) -> tuple[list[BodyInfo], np.ndarray]:
         return self._bodies_info, self.objects_to_ecef(observer, self._bodies)
+
+    def get_bodies_ecef_for_rendering(
+        self,
+        observer: Observer,
+    ) -> tuple[list[BodyInfo], np.ndarray]:
+        """Return fast apparent bodies without Sun/Jupiter/Saturn deflection."""
+        return self._bodies_info, self.objects_to_ecef(
+            observer,
+            self._bodies,
+            deflectors=(),
+        )

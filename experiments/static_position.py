@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
-from common import ECEF
-from imu import (
-    Accelerometer,
-    AccelerometerParameters,
-    MagnetometerParameters,
-)
-from sky_render import Camera
+from celestial_nav import Navigator
+from common import ECEF, Sky
+from imu import Accelerometer, AccelerometerParameters
+from sky_render import Camera, Renderer
 
 from .common import (
     Location,
     body_from_ned,
-    noisy_attitude,
+    render_and_solve_body_attitude,
     seed,
     validate_simulation_settings,
 )
@@ -27,8 +26,11 @@ from .common import (
 __all__ = ["Input", "Output", "run"]
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 _AZIMUTHS_DEG = (0.0, 90.0, 180.0, 270.0)
-_SAMPLES_PER_POSE = 15
+_SAMPLES_PER_POSE = 25
 _ROLL_DEG = 0.0
 _PITCH_DEG = 60.0
 _OUTLIER_THRESHOLD_DEG = 1.0
@@ -37,23 +39,14 @@ _SINGULAR_HORIZONTAL_NORM = 1e-8
 
 @dataclass(frozen=True)
 class Input:
-    """Full pipeline handoff for static-position estimation.
-
-    Position is calculated from the camera-derived attitude uncertainty and
-    calibrated accelerometer.  The camera and selected magnetometer models
-    remain explicit here so an incomplete upstream calibration cannot be
-    mistaken for a complete experiment run.
-    """
+    """Camera and calibrated accelerometers used for position estimation."""
 
     camera: Camera
-    attitude_noise_std_deg: float
+    sky: Sky
+    camera_to_body: np.ndarray
     true_accelerometer_parameters: AccelerometerParameters
     accelerometer_models: Mapping[
         tuple[str, int], AccelerometerParameters
-    ]
-    true_magnetometer_parameters: MagnetometerParameters
-    magnetometer_models: Mapping[
-        tuple[str, int], MagnetometerParameters
     ]
     locations: tuple[Location, ...]
     repetitions: int
@@ -71,24 +64,21 @@ def _validate_input(input: Input) -> None:
         raise TypeError("input must be a static-position Input")
     validate_simulation_settings(
         input.camera,
-        input.attitude_noise_std_deg,
         input.locations,
         input.repetitions,
         input.random_seed,
     )
+    if not isinstance(input.sky, Sky):
+        raise TypeError("sky must be a Sky")
+    camera_to_body = np.asarray(input.camera_to_body)
+    if camera_to_body.shape != (3, 3) or not np.isfinite(camera_to_body).all():
+        raise ValueError("camera_to_body must be a finite 3x3 matrix")
     if not isinstance(
         input.true_accelerometer_parameters,
         AccelerometerParameters,
     ):
         raise TypeError(
             "true_accelerometer_parameters must be AccelerometerParameters"
-        )
-    if not isinstance(
-        input.true_magnetometer_parameters,
-        MagnetometerParameters,
-    ):
-        raise TypeError(
-            "true_magnetometer_parameters must be MagnetometerParameters"
         )
     required_keys = tuple(
         (location.name, repetition)
@@ -100,12 +90,6 @@ def _validate_input(input: Input) -> None:
         required_keys,
         AccelerometerParameters,
         "accelerometer_models",
-    )
-    _require_models(
-        input.magnetometer_models,
-        required_keys,
-        MagnetometerParameters,
-        "magnetometer_models",
     )
 
 
@@ -189,8 +173,22 @@ def run(input: Input) -> Output:
     results = []
     observations = []
 
+    fov = input.camera.geometry.fov
+    fov_range = (max(1, round(fov) - 2), min(179, round(fov) + 2))
+    navigator = Navigator(input.sky, fov_range=fov_range)
+    renderer = Renderer(input.sky, input.camera)
+    exposure_s = input.camera.image_model.exposure_time
+
     for repetition in range(input.repetitions):
         for location in input.locations:
+            total_samples = len(_AZIMUTHS_DEG) * _SAMPLES_PER_POSE
+            LOGGER.info(
+                "Static position: %s, repetition %d/%d (%d samples)",
+                location.name,
+                repetition + 1,
+                input.repetitions,
+                total_samples,
+            )
             correction = input.accelerometer_models[
                 (location.name, repetition)
             ]
@@ -210,6 +208,7 @@ def run(input: Input) -> Output:
             zeniths = []
             positions = []
             rejected = 0
+            solved_images = 0
 
             azimuths = (
                 azimuth
@@ -217,16 +216,17 @@ def run(input: Input) -> Output:
                 for _ in range(_SAMPLES_PER_POSE)
             )
             for sample, azimuth in enumerate(azimuths):
+                timestamp = location.observation_time + dt.timedelta(
+                    seconds=sample * exposure_s
+                )
                 attitude = body_from_ned(_ROLL_DEG, _PITCH_DEG, azimuth)
                 reading = sensor.measure(attitude)
-                try:
-                    zenith_body = correction.correct(reading)
-                    zenith_body /= np.linalg.norm(zenith_body)
-                except (ValueError, np.linalg.LinAlgError):
-                    rejected += 1
-                    continue
-
-                estimated_attitude = noisy_attitude(
+                estimated_attitude = render_and_solve_body_attitude(
+                    renderer,
+                    navigator,
+                    input.camera_to_body,
+                    location,
+                    timestamp,
                     attitude,
                     seed(
                         input.random_seed,
@@ -234,82 +234,109 @@ def run(input: Input) -> Output:
                         repetition,
                         location.name,
                         sample,
+                        "render",
                     ),
-                    input.attitude_noise_std_deg,
                 )
-                zenith_ecef = (
-                    ecef_to_ned.T
-                    @ estimated_attitude.T
-                    @ zenith_body
-                )
-                zenith_ecef /= np.linalg.norm(zenith_ecef)
-                position = _zenith_location(zenith_ecef)
-                if position is None:
+                if estimated_attitude is None:
                     rejected += 1
-                    continue
+                else:
+                    solved_images += 1
+                    try:
+                        zenith_body = correction.correct(reading)
+                        zenith_body /= np.linalg.norm(zenith_body)
+                        zenith_ecef = (
+                            ecef_to_ned.T
+                            @ estimated_attitude.T
+                            @ zenith_body
+                        )
+                        zenith_ecef /= np.linalg.norm(zenith_ecef)
+                        position = _zenith_location(zenith_ecef)
+                    except (ValueError, np.linalg.LinAlgError):
+                        position = None
 
-                zeniths.append(zenith_ecef)
-                positions.append(position)
-                observations.append({
-                    "location": location.name,
-                    "repetition": repetition,
-                    "sample": sample,
-                    "azimuth_deg": azimuth,
-                    "latitude_deg": position[0],
-                    "longitude_deg": position[1],
-                    "position_error_m": _position_error_m(
-                        location.latitude_deg,
-                        location.longitude_deg,
-                        position,
-                    ),
-                })
+                    if position is None:
+                        rejected += 1
+                    else:
+                        zeniths.append(zenith_ecef)
+                        positions.append(position)
+                        observations.append({
+                            "location": location.name,
+                            "repetition": repetition,
+                            "sample": sample,
+                            "azimuth_deg": azimuth,
+                            "latitude_deg": position[0],
+                            "longitude_deg": position[1],
+                            "position_error_m": _position_error_m(
+                                location.latitude_deg,
+                                location.longitude_deg,
+                                position,
+                            ),
+                        })
+
+                completed = sample + 1
+                if (
+                    completed == 1
+                    or completed % 10 == 0
+                    or completed == total_samples
+                ):
+                    LOGGER.info(
+                        "Static position %s: %d/%d samples, %d images solved, "
+                        "%d positions accepted, %d rejected",
+                        location.name,
+                        completed,
+                        total_samples,
+                        solved_images,
+                        len(zeniths),
+                        rejected,
+                    )
 
             if not zeniths:
-                results.append({
-                    "location": location.name,
-                    "repetition": repetition,
-                    "latitude_deg": location.latitude_deg,
-                    "longitude_deg": location.longitude_deg,
-                    "individual_image_mean_error_m": None,
-                    "four_pose_error_m": None,
-                    "accepted_images": 0,
-                    "rejected_images": rejected,
-                    "status": "no_valid_images",
-                })
-                continue
-
-            zeniths, positions, outliers = _reject_outliers(
-                zeniths,
-                positions,
-            )
-            rejected += outliers
-            combined_position = _zenith_location(np.sum(zeniths, axis=0))
-
-            if combined_position is None:
+                individual_error = None
                 combined_error = None
-                status = "rejected_invalid_combined_position"
+                status = "no_valid_images"
             else:
-                combined_error = _position_error_m(
+                zeniths, positions, outliers = _reject_outliers(
+                    zeniths,
+                    positions,
+                )
+                rejected += outliers
+                combined_position = _zenith_location(np.sum(
+                    zeniths,
+                    axis=0,
+                ))
+                individual_error = _mean_position_error_m(
                     location.latitude_deg,
                     location.longitude_deg,
-                    combined_position,
+                    positions,
                 )
-                status = "complete"
+                if combined_position is None:
+                    combined_error = None
+                    status = "rejected_invalid_combined_position"
+                else:
+                    combined_error = _position_error_m(
+                        location.latitude_deg,
+                        location.longitude_deg,
+                        combined_position,
+                    )
+                    status = "complete"
 
             results.append({
                 "location": location.name,
                 "repetition": repetition,
                 "latitude_deg": location.latitude_deg,
                 "longitude_deg": location.longitude_deg,
-                "individual_image_mean_error_m": _mean_position_error_m(
-                    location.latitude_deg,
-                    location.longitude_deg,
-                    positions,
-                ),
+                "individual_image_mean_error_m": individual_error,
                 "four_pose_error_m": combined_error,
                 "accepted_images": len(zeniths),
                 "rejected_images": rejected,
                 "status": status,
             })
+            LOGGER.info(
+                "Static position %s finished: %s, %d accepted, %d rejected",
+                location.name,
+                status,
+                len(zeniths),
+                rejected,
+            )
 
     return Output(tuple(results), tuple(observations))

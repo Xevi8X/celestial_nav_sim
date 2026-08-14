@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
 
+from celestial_nav import Navigator
+from common import Sky
 from imu import (
     Magnetometer,
     MagnetometerCalibration,
@@ -14,19 +18,22 @@ from imu import (
     WMM2025Provider,
     magnetic_heading_deg,
 )
-from sky_render import Camera
+from sky_render import Camera, Renderer
 
 from .common import (
     Location,
     angle_difference_deg,
     body_from_ned,
-    noisy_attitude,
+    render_and_solve_body_attitude,
     seed,
     validate_simulation_settings,
 )
 
 
 __all__ = ["Input", "Output", "run"]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _HEADING_STEP_DEG = 15.0
@@ -51,7 +58,8 @@ _HANDOFF_PROCEDURE = "Complete pattern"
 @dataclass(frozen=True)
 class Input:
     camera: Camera
-    attitude_noise_std_deg: float
+    sky: Sky
+    camera_to_body: np.ndarray
     true_parameters: MagnetometerParameters
     locations: tuple[Location, ...]
     repetitions: int
@@ -70,11 +78,15 @@ def _validate_input(value: Input) -> None:
         raise TypeError("input must be a magnetometer calibration Input")
     validate_simulation_settings(
         value.camera,
-        value.attitude_noise_std_deg,
         value.locations,
         value.repetitions,
         value.random_seed,
     )
+    if not isinstance(value.sky, Sky):
+        raise TypeError("sky must be a Sky")
+    camera_to_body = np.asarray(value.camera_to_body)
+    if camera_to_body.shape != (3, 3) or not np.isfinite(camera_to_body).all():
+        raise ValueError("camera_to_body must be a finite 3x3 matrix")
     if not isinstance(value.true_parameters, MagnetometerParameters):
         raise TypeError("true_parameters must be MagnetometerParameters")
     parameter_values = (
@@ -103,6 +115,10 @@ def _orientations(constrained: bool):
             yield roll, pitch, float(yaw)
 
 
+def _rms(values):
+    return None if not values else float(np.sqrt(np.mean(np.square(values))))
+
+
 def run(input: Input) -> Output:
     """Run both maneuvers and return their fitted models and raw records."""
 
@@ -112,6 +128,12 @@ def run(input: Input) -> Output:
     results = []
     updates = []
     models = {}
+
+    fov = input.camera.geometry.fov
+    fov_range = (max(1, round(fov) - 2), min(179, round(fov) + 2))
+    navigator = Navigator(input.sky, fov_range=fov_range)
+    renderer = Renderer(input.sky, input.camera)
+    exposure_s = input.camera.image_model.exposure_time
 
     for repetition in range(input.repetitions):
         for location in input.locations:
@@ -128,6 +150,16 @@ def run(input: Input) -> Output:
                 (_HANDOFF_PROCEDURE, False),
                 ("One constrained turn", True),
             ):
+                poses = tuple(_orientations(constrained))
+                LOGGER.info(
+                    "Magnetometer calibration: %s, repetition %d/%d, %s "
+                    "(%d samples)",
+                    location.name,
+                    repetition + 1,
+                    input.repetitions,
+                    procedure,
+                    len(poses),
+                )
                 run_seed = seed(
                     input.random_seed,
                     "magnetometer",
@@ -145,27 +177,33 @@ def run(input: Input) -> Output:
                     reference_scale_ut=_REFERENCE_SCALE_UT,
                 )
 
-                accepted = 0
-                for index, (roll, pitch, yaw) in enumerate(
-                    _orientations(constrained)
-                ):
+                accepted_observations = 0
+                rejected_observations = 0
+                for index, (roll, pitch, yaw) in enumerate(poses):
+                    timestamp = location.observation_time + dt.timedelta(
+                        seconds=index * exposure_s
+                    )
                     actual_attitude = body_from_ned(roll, pitch, yaw)
                     reading = sensor.measure(actual_attitude @ field_ned)
-                    estimated_attitude = noisy_attitude(
+
+                    estimated_attitude = render_and_solve_body_attitude(
+                        renderer,
+                        navigator,
+                        input.camera_to_body,
+                        location,
+                        timestamp,
                         actual_attitude,
-                        seed(
-                            input.random_seed,
-                            run_seed,
-                            index,
-                            "attitude",
-                        ),
-                        input.attitude_noise_std_deg,
+                        seed(run_seed, index, "render"),
                     )
-                    calibration.update(
-                        estimated_attitude @ field_ned,
-                        reading,
-                    )
-                    accepted += 1
+                    accepted = estimated_attitude is not None
+                    if accepted:
+                        calibration.update(
+                            estimated_attitude @ field_ned,
+                            reading,
+                        )
+                        accepted_observations += 1
+                    else:
+                        rejected_observations += 1
 
                     condition_number = calibration.condition_number
                     updates.append({
@@ -173,7 +211,10 @@ def run(input: Input) -> Output:
                         "repetition": repetition,
                         "procedure": procedure,
                         "observation": index,
-                        "accepted": True,
+                        "roll_deg": roll,
+                        "pitch_deg": pitch,
+                        "yaw_deg": yaw,
+                        "accepted": accepted,
                         "initialized": calibration.initialized,
                         "converged": calibration.converged,
                         "condition_number": (
@@ -182,10 +223,41 @@ def run(input: Input) -> Output:
                         ),
                         "stable_updates": calibration.stable_updates,
                     })
+                    completed = index + 1
+                    if (
+                        completed == 1
+                        or completed % 10 == 0
+                        or completed == len(poses)
+                        or calibration.converged
+                    ):
+                        LOGGER.info(
+                            "Magnetometer calibration %s/%s: %d/%d samples, "
+                            "%d accepted, %d rejected",
+                            location.name,
+                            procedure,
+                            completed,
+                            len(poses),
+                            accepted_observations,
+                            rejected_observations,
+                        )
                     if calibration.converged:
                         break
 
-                fitted[procedure] = (calibration, accepted)
+                LOGGER.info(
+                    "Magnetometer calibration %s/%s finished: %s, "
+                    "%d accepted, %d rejected",
+                    location.name,
+                    procedure,
+                    "converged" if calibration.converged else "maneuver complete",
+                    accepted_observations,
+                    rejected_observations,
+                )
+
+                fitted[procedure] = (
+                    calibration,
+                    accepted_observations,
+                    rejected_observations,
+                )
                 if (
                     procedure == _HANDOFF_PROCEDURE
                     and calibration.initialized
@@ -197,6 +269,8 @@ def run(input: Input) -> Output:
             evaluations = {
                 procedure: ([], []) for procedure in fitted
             }
+            uncalibrated_vector_errors = []
+            uncalibrated_heading_errors = []
             test_rng = np.random.default_rng(seed(
                 input.random_seed,
                 "magnetometer-tests",
@@ -222,7 +296,26 @@ def run(input: Input) -> Output:
                 reference_body = attitude @ field_ned
                 reading = test_sensor.measure(reference_body)
 
-                for procedure, (calibration, _accepted) in fitted.items():
+                uncalibrated_vector_errors.append(float(np.linalg.norm(
+                    reading - reference_body
+                )))
+                if not field.in_blackout_zone:
+                    raw_ned = attitude.T @ reading
+                    try:
+                        uncalibrated_heading_errors.append(
+                            angle_difference_deg(
+                                magnetic_heading_deg(raw_ned),
+                                magnetic_heading_deg(field_ned),
+                            )
+                        )
+                    except ValueError:
+                        pass
+
+                for procedure, (calibration, _accepted, _rejected) in (
+                    fitted.items()
+                ):
+                    if not calibration.initialized:
+                        continue
                     corrected_body = calibration.correct(reading)
                     vector_error = float(np.linalg.norm(
                         corrected_body - reference_body
@@ -241,27 +334,42 @@ def run(input: Input) -> Output:
                         continue
                     evaluations[procedure][1].append(heading_error)
 
-            for procedure, (calibration, accepted) in fitted.items():
+            results.append({
+                "location": location.name,
+                "repetition": repetition,
+                "procedure": "Uncalibrated",
+                "vector_error_ut": _rms(uncalibrated_vector_errors),
+                "heading_error_deg": _rms(uncalibrated_heading_errors),
+                "test_orientation_count": len(uncalibrated_vector_errors),
+                "accepted_observations": None,
+                "rejected_observations": None,
+                "wmm_blackout_zone": field.in_blackout_zone,
+                "status": (
+                    "heading_rejected_wmm_blackout"
+                    if field.in_blackout_zone
+                    else "baseline"
+                ),
+            })
+            for procedure, (
+                calibration,
+                accepted_observations,
+                rejected_observations,
+            ) in fitted.items():
                 vector_errors, heading_errors = evaluations[procedure]
                 results.append({
                     "location": location.name,
                     "repetition": repetition,
                     "procedure": procedure,
-                    "vector_error_ut": float(np.sqrt(np.mean(
-                        np.square(vector_errors)
-                    ))),
-                    "heading_error_deg": (
-                        None if not heading_errors
-                        else float(np.sqrt(np.mean(
-                            np.square(heading_errors)
-                        )))
-                    ),
+                    "vector_error_ut": _rms(vector_errors),
+                    "heading_error_deg": _rms(heading_errors),
                     "test_orientation_count": len(vector_errors),
-                    "accepted_observations": accepted,
-                    "rejected_observations": 0,
+                    "accepted_observations": accepted_observations,
+                    "rejected_observations": rejected_observations,
                     "wmm_blackout_zone": field.in_blackout_zone,
                     "status": (
-                        "heading_rejected_wmm_blackout"
+                        "unobservable"
+                        if not calibration.initialized
+                        else "heading_rejected_wmm_blackout"
                         if field.in_blackout_zone
                         else "converged"
                         if calibration.converged

@@ -5,11 +5,20 @@ from PIL import Image
 from typing import Iterable, Optional, Union
 
 from common import Config, ECEF, Observer, Sky
-from .lost_in_space import LostInSpace
+from .lost_in_space import LostInSpace, _validate_pattern_checking_stars
 
 class Navigator:
-    def __init__(self, sky : Sky, fov_range : tuple[int,int] =(40, 60), star_max_magnitude=7):
+    def __init__(
+        self,
+        sky: Sky,
+        fov_range: tuple[int, int] = (40, 60),
+        star_max_magnitude=7,
+        pattern_checking_stars: Optional[int] = None,
+    ):
         self.sky = sky
+        self._pattern_checking_stars = _validate_pattern_checking_stars(
+            pattern_checking_stars
+        )
         db_path = LostInSpace.get_db_path(min_fov=fov_range[0], max_fov=fov_range[1], star_max_magnitude=star_max_magnitude)
         if not db_path.exists():
             db_path = LostInSpace.generate_db(min_fov=fov_range[0], max_fov=fov_range[1], star_max_magnitude=star_max_magnitude)
@@ -26,9 +35,17 @@ class Navigator:
         self,
         image: Image.Image,
     ) -> Optional[LostInSpace.Solution]:
+        solve_options = {"distortion": 0.0}
+        pattern_checking_stars = getattr(
+            self,
+            "_pattern_checking_stars",
+            None,
+        )
+        if pattern_checking_stars is not None:
+            solve_options["pattern_checking_stars"] = pattern_checking_stars
         solution = self._lis.solve(
             self._navigation_image(image),
-            distortion=0.0,
+            **solve_options,
         )
         return solution
 

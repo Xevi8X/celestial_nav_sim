@@ -31,10 +31,19 @@ LOGGER = logging.getLogger(__name__)
 
 _AZIMUTHS_DEG = (0.0, 90.0, 180.0, 270.0)
 _SAMPLES_PER_POSE = 25
+_MAXIMUM_ATTEMPTS_PER_DIRECTION = 50
+_ACCELEROMETER_READINGS_PER_IMAGE = 20
+_PATTERN_CHECKING_STARS = 12
 _ROLL_DEG = 0.0
 _PITCH_DEG = 60.0
 _OUTLIER_THRESHOLD_DEG = 1.0
 _SINGULAR_HORIZONTAL_NORM = 1e-8
+_CARDINAL_DIRECTION_NAMES = {
+    0.0: "North",
+    90.0: "East",
+    180.0: "South",
+    270.0: "West",
+}
 
 
 @dataclass(frozen=True)
@@ -151,19 +160,15 @@ def _mean_position_error_m(
     ]))
 
 
-def _reject_outliers(zeniths, positions):
+def _inlier_mask(zeniths):
     vectors = np.asarray(zeniths)
     center = np.sum(vectors, axis=0)
     center /= np.linalg.norm(center)
     angles = np.degrees(np.arccos(np.clip(vectors @ center, -1.0, 1.0)))
     inliers = angles <= _OUTLIER_THRESHOLD_DEG
     if np.count_nonzero(inliers) < 2:
-        return vectors, positions, 0
-    return (
-        vectors[inliers],
-        [position for position, keep in zip(positions, inliers) if keep],
-        int(np.count_nonzero(~inliers)),
-    )
+        return np.ones(len(vectors), dtype=bool)
+    return inliers
 
 
 def run(input: Input) -> Output:
@@ -175,19 +180,28 @@ def run(input: Input) -> Output:
 
     fov = input.camera.geometry.fov
     fov_range = (max(1, round(fov) - 2), min(179, round(fov) + 2))
-    navigator = Navigator(input.sky, fov_range=fov_range)
+    navigator = Navigator(
+        input.sky,
+        fov_range=fov_range,
+        pattern_checking_stars=_PATTERN_CHECKING_STARS,
+    )
     renderer = Renderer(input.sky, input.camera)
     exposure_s = input.camera.image_model.exposure_time
 
     for repetition in range(input.repetitions):
         for location in input.locations:
-            total_samples = len(_AZIMUTHS_DEG) * _SAMPLES_PER_POSE
+            target_samples = len(_AZIMUTHS_DEG) * _SAMPLES_PER_POSE
+            maximum_attempts = (
+                len(_AZIMUTHS_DEG) * _MAXIMUM_ATTEMPTS_PER_DIRECTION
+            )
             LOGGER.info(
-                "Static position: %s, repetition %d/%d (%d samples)",
+                "Static position: %s, repetition %d/%d "
+                "(target %d valid samples, at most %d attempts)",
                 location.name,
                 repetition + 1,
                 input.repetitions,
-                total_samples,
+                target_samples,
+                maximum_attempts,
             )
             correction = input.accelerometer_models[
                 (location.name, repetition)
@@ -207,99 +221,154 @@ def run(input: Input) -> Output:
             )
             zeniths = []
             positions = []
-            rejected = 0
+            location_observations = []
             solved_images = 0
+            attempted_images = 0
+            direction_attempted_images = {}
+            direction_valid_images = {}
+            outliers = 0
 
-            azimuths = (
-                azimuth
-                for azimuth in _AZIMUTHS_DEG
-                for _ in range(_SAMPLES_PER_POSE)
-            )
-            for sample, azimuth in enumerate(azimuths):
-                timestamp = location.observation_time + dt.timedelta(
-                    seconds=sample * exposure_s
+            for azimuth in _AZIMUTHS_DEG:
+                direction = _CARDINAL_DIRECTION_NAMES.get(
+                    float(azimuth),
+                    f"{float(azimuth):g} deg",
                 )
-                attitude = body_from_ned(_ROLL_DEG, _PITCH_DEG, azimuth)
-                reading = sensor.measure(attitude)
-                estimated_attitude = render_and_solve_body_attitude(
-                    renderer,
-                    navigator,
-                    input.camera_to_body,
-                    location,
-                    timestamp,
-                    attitude,
-                    seed(
-                        input.random_seed,
-                        "position",
-                        repetition,
-                        location.name,
-                        sample,
-                        "render",
-                    ),
-                )
-                if estimated_attitude is None:
-                    rejected += 1
-                else:
-                    solved_images += 1
-                    try:
-                        zenith_body = correction.correct(reading)
-                        zenith_body /= np.linalg.norm(zenith_body)
-                        zenith_ecef = (
-                            ecef_to_ned.T
-                            @ estimated_attitude.T
-                            @ zenith_body
-                        )
-                        zenith_ecef /= np.linalg.norm(zenith_ecef)
-                        position = _zenith_location(zenith_ecef)
-                    except (ValueError, np.linalg.LinAlgError):
-                        position = None
-
-                    if position is None:
-                        rejected += 1
-                    else:
-                        zeniths.append(zenith_ecef)
-                        positions.append(position)
-                        observations.append({
-                            "location": location.name,
-                            "repetition": repetition,
-                            "sample": sample,
-                            "azimuth_deg": azimuth,
-                            "latitude_deg": position[0],
-                            "longitude_deg": position[1],
-                            "position_error_m": _position_error_m(
-                                location.latitude_deg,
-                                location.longitude_deg,
-                                position,
-                            ),
-                        })
-
-                completed = sample + 1
-                if (
-                    completed == 1
-                    or completed % 10 == 0
-                    or completed == total_samples
+                direction_attempts = 0
+                direction_valid = 0
+                direction_zeniths = []
+                direction_positions = []
+                direction_observations = []
+                direction_inliers = np.empty(0, dtype=bool)
+                while (
+                    direction_attempts < _MAXIMUM_ATTEMPTS_PER_DIRECTION
+                    and direction_valid < _SAMPLES_PER_POSE
                 ):
-                    LOGGER.info(
-                        "Static position %s: %d/%d samples, %d images solved, "
-                        "%d positions accepted, %d rejected",
-                        location.name,
-                        completed,
-                        total_samples,
-                        solved_images,
-                        len(zeniths),
-                        rejected,
+                    sample = attempted_images
+                    direction_attempt = direction_attempts
+                    attempted_images += 1
+                    direction_attempts += 1
+                    timestamp = location.observation_time + dt.timedelta(
+                        seconds=sample * exposure_s
                     )
+                    attitude = body_from_ned(
+                        _ROLL_DEG,
+                        _PITCH_DEG,
+                        azimuth,
+                    )
+                    reading = np.mean(
+                        [
+                            sensor.measure(attitude)
+                            for _ in range(
+                                _ACCELEROMETER_READINGS_PER_IMAGE
+                            )
+                        ],
+                        axis=0,
+                    )
+                    estimated_attitude = render_and_solve_body_attitude(
+                        renderer,
+                        navigator,
+                        input.camera_to_body,
+                        location,
+                        timestamp,
+                        attitude,
+                        seed(
+                            input.random_seed,
+                            "position",
+                            repetition,
+                            location.name,
+                            sample,
+                            "render",
+                        ),
+                    )
+                    if estimated_attitude is not None:
+                        solved_images += 1
+                        try:
+                            zenith_body = correction.correct(reading)
+                            zenith_body /= np.linalg.norm(zenith_body)
+                            zenith_ecef = (
+                                ecef_to_ned.T
+                                @ estimated_attitude.T
+                                @ zenith_body
+                            )
+                            zenith_ecef /= np.linalg.norm(zenith_ecef)
+                            position = _zenith_location(zenith_ecef)
+                        except (ValueError, np.linalg.LinAlgError):
+                            position = None
 
+                        if position is not None:
+                            direction_zeniths.append(zenith_ecef)
+                            direction_positions.append(position)
+                            direction_observations.append({
+                                "location": location.name,
+                                "repetition": repetition,
+                                "sample": sample,
+                                "direction_attempt": direction_attempt,
+                                "direction": direction,
+                                "azimuth_deg": azimuth,
+                                "latitude_deg": position[0],
+                                "longitude_deg": position[1],
+                                "position_error_m": _position_error_m(
+                                    location.latitude_deg,
+                                    location.longitude_deg,
+                                    position,
+                                ),
+                            })
+                            direction_inliers = _inlier_mask(
+                                direction_zeniths
+                            )
+                            direction_valid = min(
+                                int(np.count_nonzero(direction_inliers)),
+                                _SAMPLES_PER_POSE,
+                            )
+
+                    if (
+                        direction_attempts == 1
+                        or direction_attempts % 10 == 0
+                        or direction_valid == _SAMPLES_PER_POSE
+                    ):
+                        LOGGER.info(
+                            "Static position %s/%s: %d/%d attempts, "
+                            "%d/%d valid; %d images solved, %d total valid",
+                            location.name,
+                            direction,
+                            direction_attempts,
+                            _MAXIMUM_ATTEMPTS_PER_DIRECTION,
+                            direction_valid,
+                            _SAMPLES_PER_POSE,
+                            solved_images,
+                            len(zeniths) + direction_valid,
+                        )
+
+                retained_indices = np.flatnonzero(
+                    direction_inliers
+                )[:_SAMPLES_PER_POSE]
+                outliers += int(np.count_nonzero(~direction_inliers))
+                zeniths.extend(
+                    direction_zeniths[index]
+                    for index in retained_indices
+                )
+                positions.extend(
+                    direction_positions[index]
+                    for index in retained_indices
+                )
+                location_observations.extend(
+                    direction_observations[index]
+                    for index in retained_indices
+                )
+                direction_valid = len(retained_indices)
+                direction_attempted_images[direction] = direction_attempts
+                direction_valid_images[direction] = direction_valid
+
+            incomplete_directions = tuple(
+                direction
+                for direction, count in direction_valid_images.items()
+                if count < _SAMPLES_PER_POSE
+            )
             if not zeniths:
                 individual_error = None
                 combined_error = None
-                status = "no_valid_images"
+                status = "insufficient_direction_samples"
             else:
-                zeniths, positions, outliers = _reject_outliers(
-                    zeniths,
-                    positions,
-                )
-                rejected += outliers
                 combined_position = _zenith_location(np.sum(
                     zeniths,
                     axis=0,
@@ -311,14 +380,24 @@ def run(input: Input) -> Output:
                 )
                 if combined_position is None:
                     combined_error = None
-                    status = "rejected_invalid_combined_position"
+                    status = (
+                        "insufficient_direction_samples"
+                        if incomplete_directions
+                        else "rejected_invalid_combined_position"
+                    )
                 else:
                     combined_error = _position_error_m(
                         location.latitude_deg,
                         location.longitude_deg,
                         combined_position,
                     )
-                    status = "complete"
+                    if incomplete_directions:
+                        status = "insufficient_direction_samples"
+                    else:
+                        status = "complete"
+
+            observations.extend(location_observations)
+            rejected_images = attempted_images - len(zeniths)
 
             results.append({
                 "location": location.name,
@@ -327,8 +406,14 @@ def run(input: Input) -> Output:
                 "longitude_deg": location.longitude_deg,
                 "individual_image_mean_error_m": individual_error,
                 "four_pose_error_m": combined_error,
+                "target_accepted_images": target_samples,
+                "attempted_images": attempted_images,
                 "accepted_images": len(zeniths),
-                "rejected_images": rejected,
+                "rejected_images": rejected_images,
+                "outlier_images": outliers,
+                "direction_attempted_images": direction_attempted_images,
+                "direction_valid_images": direction_valid_images,
+                "incomplete_directions": incomplete_directions,
                 "status": status,
             })
             LOGGER.info(
@@ -336,7 +421,7 @@ def run(input: Input) -> Output:
                 location.name,
                 status,
                 len(zeniths),
-                rejected,
+                rejected_images,
             )
 
     return Output(tuple(results), tuple(observations))

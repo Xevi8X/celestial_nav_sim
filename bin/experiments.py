@@ -83,7 +83,7 @@ def _run_experiments() -> dict[str, object]:
             (0.015, -0.02, 1.02),
         )),
         offset=np.asarray((6.0, -4.0, 3.0)),
-        noise_stddev=np.asarray((0.15, 0.15, 0.15)),
+        noise_stddev=np.asarray((0.03, 0.03, 0.03)),
     )
     sky = Sky(magnitude_limit=7)
 

@@ -25,6 +25,7 @@ from .common import (
     angle_difference_deg,
     body_from_ned,
     render_and_solve_body_attitude,
+    rotation_error_deg,
     seed,
     validate_simulation_settings,
 )
@@ -117,6 +118,91 @@ def _orientations(constrained: bool):
 
 def _rms(values):
     return None if not values else float(np.sqrt(np.mean(np.square(values))))
+
+
+def _mean(values):
+    return None if not values else float(np.mean(values))
+
+
+def _held_out_heading_sweep():
+    """Yield evenly spaced near-level attitudes over one complete turn."""
+
+    headings = np.linspace(
+        0.0,
+        360.0,
+        _HELD_OUT_ORIENTATIONS,
+        endpoint=False,
+    )
+    for yaw in headings:
+        yield body_from_ned(
+            _CONSTRAINED_ROLL_DEG,
+            _CONSTRAINED_PITCH_DEG,
+            float(yaw),
+        )
+
+
+def _decompose_rotation_and_scale(
+    transformation_matrix: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return effective rotation and column scales for an affine matrix.
+
+    The definition matches ``AccelerometerCalibration.get_parameters``:
+    column lengths define the three positive scale factors, after which the
+    normalized matrix is projected onto the nearest proper rotation matrix.
+    This also gives a deterministic effective decomposition when soft-iron or
+    cross-axis terms mean that the normalized columns are not exactly
+    orthogonal.
+    """
+
+    matrix = np.asarray(transformation_matrix, dtype=float)
+    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        raise ValueError("transformation_matrix must be a finite 3x3 matrix")
+
+    scale = np.linalg.norm(matrix, axis=0)
+    if np.any(scale <= np.finfo(float).eps):
+        raise ValueError("transformation_matrix columns must be nonzero")
+
+    normalized = matrix / scale
+    left, _, right = np.linalg.svd(normalized)
+    correction = np.eye(3)
+    correction[2, 2] = np.sign(np.linalg.det(left @ right))
+    rotation = left @ correction @ right
+    return rotation, scale
+
+
+def _parameter_errors(
+    actual: MagnetometerParameters,
+    estimated: MagnetometerParameters,
+) -> dict[str, float]:
+    """Calculate effective rotation, scale, and affine-bias errors.
+
+    ``bias_error_ut`` compares the directly observable affine offsets
+    (``h_m`` in the article's magnetometer model), expressed in microtesla.
+    """
+
+    if not isinstance(actual, MagnetometerParameters):
+        raise TypeError("actual must be MagnetometerParameters")
+    if not isinstance(estimated, MagnetometerParameters):
+        raise TypeError("estimated must be MagnetometerParameters")
+
+    actual_rotation, actual_scale = _decompose_rotation_and_scale(
+        actual.transformation_matrix
+    )
+    estimated_rotation, estimated_scale = _decompose_rotation_and_scale(
+        estimated.transformation_matrix
+    )
+    return {
+        "rotation_error_deg": rotation_error_deg(
+            actual_rotation,
+            estimated_rotation,
+        ),
+        "scale_rmse": float(np.sqrt(np.mean(np.square(
+            estimated_scale - actual_scale
+        )))),
+        "bias_error_ut": float(np.linalg.norm(
+            estimated.offset - actual.offset
+        )),
+    }
 
 
 def run(input: Input) -> Output:
@@ -271,12 +357,6 @@ def run(input: Input) -> Output:
             }
             uncalibrated_vector_errors = []
             uncalibrated_heading_errors = []
-            test_rng = np.random.default_rng(seed(
-                input.random_seed,
-                "magnetometer-tests",
-                repetition,
-                location.name,
-            ))
             test_sensor = Magnetometer(
                 actual,
                 seed=seed(
@@ -287,12 +367,7 @@ def run(input: Input) -> Output:
                 ),
             )
 
-            for _ in range(_HELD_OUT_ORIENTATIONS):
-                attitude = body_from_ned(
-                    test_rng.uniform(-60.0, 60.0),
-                    test_rng.uniform(-70.0, 70.0),
-                    test_rng.uniform(0.0, 360.0),
-                )
+            for attitude in _held_out_heading_sweep():
                 reference_body = attitude @ field_ned
                 reading = test_sensor.measure(reference_body)
 
@@ -339,7 +414,10 @@ def run(input: Input) -> Output:
                 "repetition": repetition,
                 "procedure": "Uncalibrated",
                 "vector_error_ut": _rms(uncalibrated_vector_errors),
-                "heading_error_deg": _rms(uncalibrated_heading_errors),
+                "heading_error_deg": _mean(uncalibrated_heading_errors),
+                "rotation_error_deg": None,
+                "scale_rmse": None,
+                "bias_error_ut": None,
                 "test_orientation_count": len(uncalibrated_vector_errors),
                 "accepted_observations": None,
                 "rejected_observations": None,
@@ -356,12 +434,26 @@ def run(input: Input) -> Output:
                 rejected_observations,
             ) in fitted.items():
                 vector_errors, heading_errors = evaluations[procedure]
+                parameter_errors = {
+                    "rotation_error_deg": None,
+                    "scale_rmse": None,
+                    "bias_error_ut": None,
+                }
+                if (
+                    procedure == _HANDOFF_PROCEDURE
+                    and calibration.initialized
+                ):
+                    parameter_errors = _parameter_errors(
+                        actual,
+                        calibration.get_parameters(),
+                    )
                 results.append({
                     "location": location.name,
                     "repetition": repetition,
                     "procedure": procedure,
                     "vector_error_ut": _rms(vector_errors),
-                    "heading_error_deg": _rms(heading_errors),
+                    "heading_error_deg": _mean(heading_errors),
+                    **parameter_errors,
                     "test_orientation_count": len(vector_errors),
                     "accepted_observations": accepted_observations,
                     "rejected_observations": rejected_observations,

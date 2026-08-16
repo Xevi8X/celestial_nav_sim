@@ -79,6 +79,39 @@ class LostInSpaceMatchTests(unittest.TestCase):
             raw_result["matched_catID"],
         )
 
+    def test_solve_can_raise_the_number_of_checked_pattern_stars(self):
+        lost_in_space, tetra3_solver = self.make_solver(solver_result())
+        image = Image.new("L", (8, 6))
+
+        lost_in_space.solve(image, pattern_checking_stars=12)
+
+        tetra3_solver.solve_from_image.assert_called_once_with(
+            image,
+            distortion=(-0.1, 0.1),
+            return_matches=True,
+            return_visual=True,
+            pattern_checking_stars=12,
+        )
+
+    def test_solve_rejects_invalid_pattern_star_counts(self):
+        lost_in_space, tetra3_solver = self.make_solver(solver_result())
+        image = Image.new("L", (8, 6))
+
+        invalid_values = (
+            (True, TypeError),
+            (4.5, TypeError),
+            (3, ValueError),
+        )
+        for value, error in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaises(error):
+                    lost_in_space.solve(
+                        image,
+                        pattern_checking_stars=value,
+                    )
+
+        tetra3_solver.solve_from_image.assert_not_called()
+
     def test_solve_preserves_numpy_catalog_ids_without_processing(self):
         raw_result = solver_result(
             matched_catID=np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint16)
@@ -142,6 +175,32 @@ class NavigatorOrientationTests(unittest.TestCase):
         ).parameters
 
         self.assertNotIn("solution", parameters)
+
+    def test_find_solution_forwards_configured_pattern_star_count(self):
+        navigator = Navigator.__new__(Navigator)
+        navigator._lis = Mock()
+        navigator._pattern_checking_stars = 12
+        image = Image.new("L", (8, 6))
+
+        navigator.find_solution(image)
+
+        navigator._lis.solve.assert_called_once_with(
+            image,
+            distortion=0.0,
+            pattern_checking_stars=12,
+        )
+
+    def test_find_solution_preserves_default_solver_call_shape(self):
+        navigator = Navigator.__new__(Navigator)
+        navigator._lis = Mock()
+        image = Image.new("L", (8, 6))
+
+        navigator.find_solution(image)
+
+        navigator._lis.solve.assert_called_once_with(
+            image,
+            distortion=0.0,
+        )
 
     def test_estimate_orientation_solves_image_once(self):
         navigator = self.make_navigator()

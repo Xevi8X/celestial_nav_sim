@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from numbers import Integral
 from PIL import Image
 from pathlib import Path
 from shutil import copy2
@@ -6,6 +7,18 @@ from typing import Any, Optional
 import tetra3
 
 from common import Config
+
+
+def _validate_pattern_checking_stars(value: object) -> Optional[int]:
+    """Return a valid tetra3 pattern-search depth."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError("pattern_checking_stars must be an integer or None")
+    if value < 4:
+        raise ValueError("pattern_checking_stars must be at least 4")
+    return int(value)
 
 
 class LostInSpace:
@@ -62,16 +75,18 @@ class LostInSpace:
         self,
         image: Image.Image,
         distortion=(-0.1, 0.1),
+        pattern_checking_stars: Optional[int] = None,
     ) -> Optional[Solution]:
-        res = self._t3.solve_from_image(
-            image,
-            # pattern_checking_stars=12,
-            # match_radius=0.002,
-            # match_threshold=1e-6,
-            distortion=distortion,
-            return_matches=True,
-            return_visual=True
+        solve_options = {
+            "distortion": distortion,
+            "return_matches": True,
+            "return_visual": True,
+        }
+        if pattern_checking_stars is not None:
+            solve_options["pattern_checking_stars"] = (
+                _validate_pattern_checking_stars(pattern_checking_stars)
             )
+        res = self._t3.solve_from_image(image, **solve_options)
 
         if (
             not res

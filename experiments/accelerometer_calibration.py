@@ -44,6 +44,10 @@ _BIAS_INDICATOR_LIMIT = 1.2
 _MAXIMUM_CONDITION_NUMBER = np.inf
 _CONSECUTIVE_UPDATES = 3
 _MAXIMUM_OBSERVATIONS = 200
+_CONVERGENCE_LOCATION = "Warsaw"
+_CONVERGENCE_AZIMUTH_DEG = 0.0
+_CONVERGENCE_ACCEPTED_SAMPLES = 500
+_CONVERGENCE_MAXIMUM_ATTEMPTS = 1000
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,7 @@ class Output:
     models: Mapping[tuple[str, int], AccelerometerParameters]
     results: tuple[Mapping[str, object], ...]
     updates: tuple[Mapping[str, object], ...]
+    convergence: tuple[Mapping[str, object], ...] = ()
 
 
 def _validate_input(value: Input) -> None:
@@ -111,6 +116,149 @@ def _maneuver_pose(
         float(camera_elevation_deg),
         float(camera_azimuth_deg),
     )
+
+
+def _parameter_errors(
+    actual: AccelerometerParameters,
+    estimate: AccelerometerParameters | None,
+) -> dict[str, float | None]:
+    """Return rotation, scale, and bias errors for one fitted model."""
+
+    if estimate is None:
+        return {
+            "rotation_error_deg": None,
+            "scale_rmse": None,
+            "bias_error_mps2": None,
+        }
+    return {
+        "rotation_error_deg": rotation_error_deg(
+            actual.assembly_matrix,
+            estimate.assembly_matrix,
+        ),
+        "scale_rmse": float(np.sqrt(np.mean(np.square(
+            estimate.axis_scale - actual.axis_scale
+        )))),
+        "bias_error_mps2": float(np.linalg.norm(
+            estimate.bias - actual.bias
+        )),
+    }
+
+
+def _run_convergence(
+    input: Input,
+    location: Location,
+    navigator: Navigator,
+    renderer: Renderer,
+) -> tuple[Mapping[str, object], ...]:
+    """Run an independent Warsaw/North trace through 500 accepted samples."""
+
+    actual = input.true_parameters
+    run_seed = seed(
+        input.random_seed,
+        "accelerometer",
+        "convergence",
+        location.name,
+        _CONVERGENCE_AZIMUTH_DEG,
+    )
+    sensor = Accelerometer(actual, seed=run_seed)
+    calibration = AccelerometerCalibration(
+        matrix_indicator_limit=_MATRIX_INDICATOR_LIMIT,
+        bias_indicator_limit=_BIAS_INDICATOR_LIMIT,
+        max_condition_number=_MAXIMUM_CONDITION_NUMBER,
+        consecutive_updates=_CONSECUTIVE_UPDATES,
+    )
+    exposure_s = input.camera.image_model.exposure_time
+    records = []
+    rejected_observations = 0
+
+    LOGGER.info(
+        "Accelerometer convergence: %s/North, target %d accepted samples",
+        location.name,
+        _CONVERGENCE_ACCEPTED_SAMPLES,
+    )
+    for observation in range(_CONVERGENCE_MAXIMUM_ATTEMPTS):
+        time_s = observation * exposure_s
+        timestamp = location.observation_time + dt.timedelta(seconds=time_s)
+        roll, elevation, azimuth = _maneuver_pose(
+            time_s,
+            _CONVERGENCE_AZIMUTH_DEG,
+        )
+        actual_attitude = body_from_ned(roll, elevation, azimuth)
+        reading = sensor.measure(actual_attitude)
+        observer = camera_observer_from_body(
+            actual_attitude,
+            input.camera_to_body,
+            location,
+            timestamp,
+        )
+        render_seed = seed(
+            input.random_seed,
+            run_seed,
+            observation,
+            "render",
+        )
+        image = renderer.render(observer, noise_seed=render_seed)
+        estimated_observer = navigator.estimate_orientation(
+            image,
+            timestamp,
+            location.latitude_deg,
+            location.longitude_deg,
+            location.elevation_m,
+        )
+        if estimated_observer.observer_matrix is None:
+            rejected_observations += 1
+            continue
+
+        reference_attitude = body_from_camera_observer(
+            estimated_observer,
+            input.camera_to_body,
+        )
+        estimate = calibration.update(reference_attitude, reading)
+        accepted_observations = calibration.fit.count
+        records.append({
+            "location": location.name,
+            "repetition": 0,
+            "azimuth_deg": _CONVERGENCE_AZIMUTH_DEG,
+            "observation": observation,
+            "elapsed_s": time_s + exposure_s,
+            "roll_deg": roll,
+            "camera_elevation_deg": elevation,
+            "camera_azimuth_deg": azimuth,
+            "accepted": True,
+            "accepted_observations": accepted_observations,
+            "rejected_observations": rejected_observations,
+            "initialized": calibration.initialized,
+            **_parameter_errors(actual, estimate),
+            "converged": calibration.converged,
+            "condition_number": (
+                calibration.condition_number
+                if np.isfinite(calibration.condition_number) else None
+            ),
+            "stable_updates": calibration.stable_updates,
+        })
+
+        if (
+            accepted_observations == 1
+            or accepted_observations % 50 == 0
+        ):
+            LOGGER.info(
+                "Accelerometer convergence %s/North: %d/%d accepted "
+                "samples, %d rejected",
+                location.name,
+                accepted_observations,
+                _CONVERGENCE_ACCEPTED_SAMPLES,
+                rejected_observations,
+            )
+        if accepted_observations == _CONVERGENCE_ACCEPTED_SAMPLES:
+            break
+
+    if calibration.fit.count != _CONVERGENCE_ACCEPTED_SAMPLES:
+        raise RuntimeError(
+            "accelerometer convergence run accepted "
+            f"{calibration.fit.count} of {_CONVERGENCE_ACCEPTED_SAMPLES} "
+            f"samples after {_CONVERGENCE_MAXIMUM_ATTEMPTS} attempts"
+        )
+    return tuple(records)
 
 
 def run(input: Input) -> Output:
@@ -207,8 +355,10 @@ def run(input: Input) -> Output:
                             estimated_observer, input.camera_to_body
                         )
                         estimate = calibration.update(reference_attitude, reading)
+                        errors = _parameter_errors(actual, estimate)
                     else:
                         rejected_observations += 1
+                        errors = _parameter_errors(actual, None)
 
                     indicators = calibration.indicators
                     condition_number = calibration.condition_number
@@ -247,7 +397,9 @@ def run(input: Input) -> Output:
                         "camera_elevation_deg": elevation,
                         "camera_azimuth_deg": azimuth,
                         "accepted": accepted,
+                        "accepted_observations": calibration.fit.count,
                         "initialized": calibration.initialized,
+                        **errors,
                         **i,
                         "converged": calibration.converged,
                         "condition_number": (
@@ -282,21 +434,10 @@ def run(input: Input) -> Output:
                         break
 
                 initialized = calibration.initialized and estimate is not None
-                if initialized:
-                    rotation_error = rotation_error_deg(
-                        actual.assembly_matrix,
-                        estimate.assembly_matrix,
-                    )
-                    scale_rmse = float(np.sqrt(np.mean(np.square(
-                        estimate.axis_scale - actual.axis_scale
-                    ))))
-                    bias_error = float(np.linalg.norm(
-                        estimate.bias - actual.bias
-                    ))
-                else:
-                    rotation_error = None
-                    scale_rmse = None
-                    bias_error = None
+                errors = _parameter_errors(
+                    actual,
+                    estimate if initialized else None,
+                )
 
                 if calibration.converged:
                     status = "converged"
@@ -309,9 +450,7 @@ def run(input: Input) -> Output:
                     "location": location.name,
                     "repetition": repetition,
                     "azimuth_deg": initial_azimuth,
-                    "rotation_error_deg": rotation_error,
-                    "scale_rmse": scale_rmse,
-                    "bias_error_mps2": bias_error,
+                    **errors,
                     "accepted_observations": calibration.fit.count,
                     "rejected_observations": rejected_observations,
                     "status": status,
@@ -337,4 +476,17 @@ def run(input: Input) -> Output:
                 ):
                     models[(location.name, repetition)] = estimate
 
-    return Output(models, tuple(results), tuple(updates))
+    convergence_location = next(
+        (
+            location
+            for location in input.locations
+            if location.name == _CONVERGENCE_LOCATION
+        ),
+        None,
+    )
+    convergence = (
+        _run_convergence(input, convergence_location, navigator, renderer)
+        if convergence_location is not None
+        else ()
+    )
+    return Output(models, tuple(results), tuple(updates), convergence)

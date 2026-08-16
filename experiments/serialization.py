@@ -11,7 +11,11 @@ from typing import Any
 __all__ = ["load_experiment_outputs", "save_experiment_outputs"]
 
 
-_FORMAT = "celestial-nav-sim-outputs-v1"
+# Version 2 records the per-sample accelerometer convergence trace and the
+# magnetometer parameter-error metrics.  Version 1 also used a different
+# held-out heading-error experiment, so it must not be relabelled by the
+# current report generator.
+_FORMAT = "celestial-nav-sim-outputs-v2"
 
 
 def save_experiment_outputs(

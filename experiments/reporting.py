@@ -43,7 +43,11 @@ ARTIFACT_FILENAMES = MappingProxyType(
         "renderer_image_comparison_eps": "renderer_image_comparison.eps",
         "renderer_histogram_comparison": "renderer_histogram_comparison.eps",
         "accelerometer_figure": "accelerometer_results.eps",
+        "accelerometer_convergence_figure": "accelerometer_convergence.eps",
         "magnetometer_figure": "magnetometer_results.eps",
+        "magnetometer_parameter_errors_figure": (
+            "magnetometer_parameter_errors.eps"
+        ),
         "position_figure": "position_results.eps",
     }
 )
@@ -80,6 +84,9 @@ CSV_SCHEMAS = MappingProxyType(
             "procedure",
             "vector_error_ut",
             "heading_error_deg",
+            "rotation_error_deg",
+            "scale_rmse",
+            "bias_error_ut",
             "test_orientation_count",
             "status",
         ),
@@ -347,6 +354,25 @@ _MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*")
 _HATCHES = ("...", "///", "xxx", "+++")
 
 
+_CARDINAL_DIRECTIONS = MappingProxyType(
+    {
+        0.0: "North",
+        90.0: "East",
+        180.0: "South",
+        270.0: "West",
+    }
+)
+
+
+def _direction_label(azimuth_deg: Any) -> str:
+    azimuth = float(azimuth_deg)
+    normalized = azimuth % 360.0
+    for cardinal_azimuth, label in _CARDINAL_DIRECTIONS.items():
+        if math.isclose(normalized, cardinal_azimuth, abs_tol=1e-9):
+            return label
+    return f"{azimuth:g}°"
+
+
 def plot_renderer_histograms(
     records: Iterable[Mapping[str, Any]],
     path: str | Path,
@@ -368,15 +394,17 @@ def plot_renderer_histograms(
     image_ids = _ordered_unique(row[image_field] for row in rows)
     series = _ordered_unique(row[series_field] for row in rows)
     figure = Figure(
-        figsize=(max(3.4, 2.6 * len(image_ids)), 2.8),
+        figsize=(3.5, max(2.8, 2.2 * len(image_ids))),
         constrained_layout=True,
     )
-    axes = figure.subplots(
-        1,
-        len(image_ids),
-        squeeze=False,
-        sharey=True,
-    )[0]
+    axes = np.asarray(
+        figure.subplots(
+            len(image_ids),
+            1,
+            squeeze=False,
+            sharey=True,
+        )
+    )[:, 0]
     for axis, image_id in zip(axes, image_ids):
         for series_index, series_name in enumerate(series):
             selected = [
@@ -399,7 +427,7 @@ def plot_renderer_histograms(
         axis.set_title(str(image_id))
         axis.set_xlabel("Pixel intensity")
         _add_grid(axis)
-    axes[0].set_ylabel("Pixel fraction")
+    figure.supylabel("Pixel fraction")
     _legend_below(figure, axes[0])
     return _save_vector_eps(figure, path)
 
@@ -465,7 +493,7 @@ def plot_accelerometer_results(
             axis.scatter(
                 x_values,
                 values,
-                label=f"{float(azimuth):g}°",
+                label=_direction_label(azimuth),
                 marker=_MARKERS[azimuth_index % len(_MARKERS)],
             )
         axis.set_ylabel(label)
@@ -474,8 +502,87 @@ def plot_accelerometer_results(
         _add_grid(axis)
     for axis in axes[len(metrics):]:
         axis.set_visible(False)
-    _legend_below(figure, axes[0], title="Initial azimuth")
+    _legend_below(figure, axes[0], title="Initial direction")
     return _save_vector_eps(figure, path)
+
+
+def plot_accelerometer_convergence(
+    records: Iterable[Mapping[str, Any]],
+    path: str | Path,
+    *,
+    sample_field: str = "accepted_observations",
+    error_fields: Mapping[str, str] | None = None,
+) -> Path:
+    """Plot parameter-error convergence against accepted samples."""
+
+    rows = _materialize_records(records)
+    if not rows:
+        raise ValueError("accelerometer convergence records cannot be empty")
+    metrics = dict(
+        error_fields
+        if error_fields is not None
+        else {
+            field: label
+            for field, label in _ACCELEROMETER_METRICS.items()
+            if field != "accepted_observations"
+        }
+    )
+    _require_fields(rows, (sample_field, *metrics))
+    rows = [
+        row
+        for row in rows
+        if _finite_number(row.get(sample_field)) is not None
+        and any(
+            _finite_number(row.get(field)) is not None
+            for field in metrics
+        )
+    ]
+    if not rows:
+        raise ValueError("no finite accelerometer convergence errors were found")
+    rows.sort(key=lambda row: float(row[sample_field]))
+
+    figure = Figure(figsize=(3.5, 6.2), constrained_layout=True)
+    axes = np.asarray(
+        figure.subplots(len(metrics), 1, squeeze=False, sharex=True)
+    )[:, 0]
+    for axis, (field, label) in zip(axes, metrics.items()):
+        selected = [
+            row
+            for row in rows
+            if _finite_number(row.get(field)) is not None
+        ]
+        axis.plot(
+            [float(row[sample_field]) for row in selected],
+            [float(row[field]) for row in selected],
+            color="C0",
+        )
+        axis.set_yscale("log")
+        axis.set_ylabel(label)
+        _add_grid(axis)
+    axes[-1].set_xlabel("Accepted samples")
+    return _save_vector_eps(figure, path)
+
+
+def _magnetometer_procedure_key(procedure: Any) -> tuple[int, str]:
+    normalized = str(procedure).strip().casefold()
+    if normalized == "uncalibrated":
+        return 0, normalized
+    if "turn" in normalized or "constrained" in normalized:
+        return 1, normalized
+    if "pattern" in normalized:
+        return 2, normalized
+    return 3, normalized
+
+
+def _magnetometer_procedure_label(procedure: Any) -> str:
+    order, _ = _magnetometer_procedure_key(procedure)
+    if order == 0:
+        return "Uncalibrated"
+    if order == 1:
+        return "One turn"
+    if order == 2:
+        return "Full pattern"
+    return str(procedure)
 
 
 def plot_magnetometer_results(
@@ -487,7 +594,7 @@ def plot_magnetometer_results(
     vector_error_field: str = "vector_error_ut",
     heading_error_field: str = "heading_error_deg",
 ) -> Path:
-    """Plot baseline and calibrated magnetometer errors by location."""
+    """Plot mean heading errors by location and calibration procedure."""
 
     rows = _materialize_records(records)
     if not rows:
@@ -497,45 +604,115 @@ def plot_magnetometer_results(
         (
             location_field,
             procedure_field,
-            vector_error_field,
             heading_error_field,
         ),
     )
     locations = _ordered_unique(row[location_field] for row in rows)
-    procedures = _ordered_unique(row[procedure_field] for row in rows)
-    figure = Figure(figsize=(7.2, 3.1), constrained_layout=True)
-    axes = np.asarray(figure.subplots(1, 2, squeeze=False))[0]
+    procedures = sorted(
+        _ordered_unique(row[procedure_field] for row in rows),
+        key=_magnetometer_procedure_key,
+    )
+    figure = Figure(figsize=(3.5, 3.2), constrained_layout=True)
+    axis = figure.subplots()
     x_values = np.arange(len(locations), dtype=float)
     width = 0.8 / max(1, len(procedures))
-    for axis, field, ylabel in (
-        (axes[0], vector_error_field, "Magnetic-vector error (µT)"),
-        (axes[1], heading_error_field, "Heading error (deg)"),
-    ):
-        for index, procedure in enumerate(procedures):
-            values = []
-            for location in locations:
-                selected = [
-                    row
-                    for row in rows
-                    if row[location_field] == location
-                    and row[procedure_field] == procedure
-                ]
-                values.append(_mean(selected, field))
-            offsets = x_values - 0.4 + width / 2 + index * width
-            axis.bar(
-                offsets,
-                values,
-                width=width,
-                label=str(procedure),
-                hatch=_HATCHES[index % len(_HATCHES)],
-                edgecolor="black",
-                linewidth=0.8,
+    for index, procedure in enumerate(procedures):
+        values = []
+        for location in locations:
+            selected = [
+                row
+                for row in rows
+                if row[location_field] == location
+                and row[procedure_field] == procedure
+            ]
+            values.append(_mean(selected, heading_error_field))
+        offsets = x_values - 0.4 + width / 2 + index * width
+        axis.bar(
+            offsets,
+            values,
+            width=width,
+            label=_magnetometer_procedure_label(procedure),
+            hatch=_HATCHES[index % len(_HATCHES)],
+            edgecolor="black",
+            linewidth=0.8,
+        )
+    axis.set_ylabel("Mean heading error (deg)")
+    axis.set_xticks(x_values, [str(location) for location in locations])
+    axis.tick_params(axis="x", labelrotation=20, labelsize=8)
+    _add_grid(axis)
+    _legend_below(figure, axis)
+    return _save_vector_eps(figure, path)
+
+
+_MAGNETOMETER_PARAMETER_METRICS = MappingProxyType(
+    {
+        "rotation_error_deg": "Rotation error (deg)",
+        "scale_rmse": "Scale-factor RMSE (-)",
+        "bias_error_ut": "Bias error (µT)",
+    }
+)
+
+
+def plot_magnetometer_parameter_errors(
+    records: Iterable[Mapping[str, Any]],
+    path: str | Path,
+    *,
+    location_field: str = "location",
+    error_fields: Mapping[str, str] | None = None,
+) -> Path:
+    """Plot complete-pattern parameter errors at every location."""
+
+    rows = _materialize_records(records)
+    if not rows:
+        raise ValueError("magnetometer parameter-error records cannot be empty")
+    metrics = dict(
+        _MAGNETOMETER_PARAMETER_METRICS
+        if error_fields is None
+        else error_fields
+    )
+    _require_fields(rows, (location_field, *metrics))
+    rows = [
+        row
+        for row in rows
+        if any(
+            _finite_number(row.get(field)) is not None
+            for field in metrics
+        )
+    ]
+    if not rows:
+        raise ValueError("no finite magnetometer parameter errors were found")
+
+    locations = _ordered_unique(row[location_field] for row in rows)
+    x_values = np.arange(len(locations), dtype=float)
+    figure = Figure(figsize=(3.5, 6.2), constrained_layout=True)
+    axes = np.asarray(
+        figure.subplots(len(metrics), 1, squeeze=False, sharex=True)
+    )[:, 0]
+    for axis, (field, label) in zip(axes, metrics.items()):
+        values = [
+            _mean(
+                (row for row in rows if row[location_field] == location),
+                field,
             )
-        axis.set_ylabel(ylabel)
-        axis.set_xticks(x_values, [str(location) for location in locations])
-        axis.tick_params(axis="x", labelrotation=20, labelsize=8)
+            for location in locations
+        ]
+        axis.bar(
+            x_values,
+            values,
+            width=0.7,
+            color="C0",
+            hatch="...",
+            edgecolor="black",
+            linewidth=0.8,
+        )
+        axis.set_ylabel(label)
+        axis.set_ylim(bottom=0)
         _add_grid(axis)
-    _legend_below(figure, axes[0])
+    axes[-1].set_xticks(
+        x_values,
+        [str(location) for location in locations],
+    )
+    axes[-1].tick_params(axis="x", labelrotation=20, labelsize=8)
     return _save_vector_eps(figure, path)
 
 
@@ -559,7 +736,7 @@ def plot_position_results(
     axes = np.asarray(figure.subplots(1, 2, squeeze=False))[0]
     for axis, field, title in (
         (axes[0], individual_field, "Mean individual-image error"),
-        (axes[1], sequence_field, "Combined 100-sample error"),
+        (axes[1], sequence_field, "Combined accepted-sample error"),
     ):
         values = [
             _mean(
@@ -568,16 +745,15 @@ def plot_position_results(
             )
             for location in locations
         ]
-        bars = axis.bar(
+        axis.bar(
             x_values,
             values,
             width=0.7,
-            color=[f"C{index % 10}" for index in range(len(locations))],
+            color="C0",
+            hatch="...",
             edgecolor="black",
             linewidth=0.8,
         )
-        for index, bar in enumerate(bars):
-            bar.set_hatch(_HATCHES[index % len(_HATCHES)])
         axis.set_title(title)
         axis.set_ylabel("Position error (m)")
         axis.set_xticks(x_values, [str(location) for location in locations])
@@ -635,14 +811,21 @@ def write_renderer_montage(
     panel_width: int = 640,
     real_label: str = "Real",
     rendered_label: str = "Rendered",
+    label_font_size: int | None = None,
 ) -> tuple[Path, Path | None]:
-    """Create a raster real/rendered montage and, optionally, an EPS wrapper."""
+    """Create a raster real/rendered montage and, optionally, an EPS wrapper.
+
+    Images form the columns and the real/rendered sources form the two rows.
+    When ``label_font_size`` is omitted, the label size follows ``panel_width``.
+    """
 
     rows = _materialize_records(records)
     if not rows:
         raise ValueError("montage records cannot be empty")
     if panel_width < 32:
         raise ValueError("panel_width must be at least 32 pixels")
+    if label_font_size is not None and label_font_size < 1:
+        raise ValueError("label_font_size must be positive")
     _require_fields(rows, (image_field, real_field, rendered_field))
     prepared: list[tuple[str, Image.Image, Image.Image]] = []
     max_height = 1
@@ -661,47 +844,81 @@ def write_renderer_montage(
         prepared.append((str(row[image_field]), resized[0], resized[1]))
 
     margin = 12
-    header_height = 34
-    row_label_width = 100
+    font_size = (
+        max(10, round(panel_width / 20))
+        if label_font_size is None
+        else label_font_size
+    )
+    font = ImageFont.load_default(size=font_size)
+
+    def label_extent(label: str) -> tuple[int, int]:
+        left, top, right, bottom = font.getbbox(label)
+        return right - left, bottom - top
+
+    image_labels = [image_id for image_id, _, _ in prepared]
+    source_labels = (real_label, rendered_label)
+    header_height = max(
+        34,
+        max(label_extent(label)[1] for label in image_labels) + 2 * margin,
+    )
+    row_label_width = max(
+        100,
+        max(label_extent(label)[0] for label in source_labels) + 2 * margin,
+    )
     row_height = max_height + margin
-    width = row_label_width + 2 * panel_width + 3 * margin
-    height = header_height + len(prepared) * row_height + margin
+    width = (
+        row_label_width
+        + len(prepared) * panel_width
+        + (len(prepared) + 1) * margin
+    )
+    height = header_height + len(source_labels) * row_height + margin
     montage = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(montage)
-    font = ImageFont.load_default()
-    draw.text(
-        (row_label_width + margin + panel_width // 2, margin),
-        real_label,
-        fill="black",
-        font=font,
-        anchor="ma",
-    )
-    draw.text(
-        (row_label_width + 2 * margin + panel_width + panel_width // 2, margin),
-        rendered_label,
-        fill="black",
-        font=font,
-        anchor="ma",
-    )
-    for index, (image_id, real, rendered) in enumerate(prepared):
-        y = header_height + index * row_height
+
+    def draw_centered_label(label: str, center_x: int, center_y: int) -> None:
+        left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
         draw.text(
-            (margin, y + max_height // 2),
-            image_id,
+            (
+                round(center_x - (left + right) / 2),
+                round(center_y - (top + bottom) / 2),
+            ),
+            label,
             fill="black",
             font=font,
-            anchor="lm",
         )
-        for column, image in enumerate((real, rendered)):
+
+    for column, image_id in enumerate(image_labels):
+        x = row_label_width + margin * (column + 1) + panel_width * column
+        draw_centered_label(
+            image_id,
+            x + panel_width // 2,
+            header_height // 2,
+        )
+
+    for row_index, source_label in enumerate(source_labels):
+        y = header_height + row_index * row_height
+        draw_centered_label(
+            source_label,
+            row_label_width // 2,
+            y + max_height // 2,
+        )
+        for column, (_, real, rendered) in enumerate(prepared):
+            image = (real, rendered)[row_index]
             x = row_label_width + margin * (column + 1) + panel_width * column
             image_y = y + (max_height - image.height) // 2
             montage.paste(image, (x, image_y))
-        if index + 1 < len(prepared):
-            separator_y = y + row_height - margin // 2
-            draw.line(
-                (margin, separator_y, width - margin, separator_y),
-                fill=(204, 204, 204),
-            )
+
+    for column in range(len(prepared) - 1):
+        separator_x = (
+            row_label_width
+            + (column + 1) * panel_width
+            + (column + 1) * margin
+            + margin // 2
+        )
+        draw.line(
+            (separator_x, margin, separator_x, height - margin),
+            fill=(204, 204, 204),
+        )
 
     png_destination = Path(png_path)
     png_destination.parent.mkdir(parents=True, exist_ok=True)
@@ -849,17 +1066,34 @@ def report_accelerometer_calibration(
         output.results,
         destination / ARTIFACT_FILENAMES["accelerometer_figure"],
     )
-    updates_csv = write_records_csv(
-        destination / "raw" / "accelerometer_updates.csv",
-        output.updates,
-    )
-    return (
+    artifacts = [
         locations_csv,
         results_csv,
         figure_eps,
         figure_eps.with_suffix(".png"),
-        updates_csv,
+    ]
+    convergence = tuple(getattr(output, "convergence", ()))
+    if convergence:
+        convergence_eps = plot_accelerometer_convergence(
+            convergence,
+            destination
+            / ARTIFACT_FILENAMES["accelerometer_convergence_figure"],
+        )
+        convergence_csv = write_records_csv(
+            destination / "raw" / "accelerometer_convergence.csv",
+            convergence,
+        )
+        artifacts.extend((
+            convergence_eps,
+            convergence_eps.with_suffix(".png"),
+            convergence_csv,
+        ))
+    updates_csv = write_records_csv(
+        destination / "raw" / "accelerometer_updates.csv",
+        output.updates,
     )
+    artifacts.append(updates_csv)
+    return tuple(artifacts)
 
 
 def report_magnetometer_calibration(
@@ -878,16 +1112,36 @@ def report_magnetometer_calibration(
         output.results,
         destination / ARTIFACT_FILENAMES["magnetometer_figure"],
     )
+    artifacts = [
+        results_csv,
+        figure_eps,
+        figure_eps.with_suffix(".png"),
+    ]
+    parameter_fields = tuple(_MAGNETOMETER_PARAMETER_METRICS)
+    parameter_rows = [
+        row
+        for row in output.results
+        if all(
+            _finite_number(row.get(field)) is not None
+            for field in parameter_fields
+        )
+    ]
+    if parameter_rows:
+        parameter_eps = plot_magnetometer_parameter_errors(
+            parameter_rows,
+            destination
+            / ARTIFACT_FILENAMES["magnetometer_parameter_errors_figure"],
+        )
+        artifacts.extend((
+            parameter_eps,
+            parameter_eps.with_suffix(".png"),
+        ))
     updates_csv = write_records_csv(
         destination / "raw" / "magnetometer_updates.csv",
         output.updates,
     )
-    return (
-        results_csv,
-        figure_eps,
-        figure_eps.with_suffix(".png"),
-        updates_csv,
-    )
+    artifacts.append(updates_csv)
+    return tuple(artifacts)
 
 
 def report_static_position(

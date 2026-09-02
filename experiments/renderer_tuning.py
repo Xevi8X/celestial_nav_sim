@@ -33,7 +33,7 @@ LOGGER = logging.getLogger(__name__)
 class Input:
     """Photographs and sky model used for renderer tuning."""
 
-    photo_paths: tuple[Path, ...]
+    images: list[ImageData]
     sky: Sky
 
 
@@ -53,23 +53,12 @@ class Output:
 def _validate_input(value: Input) -> None:
     if not isinstance(value, Input):
         raise TypeError("input must be a renderer-tuning Input")
-    if not isinstance(value.photo_paths, tuple) or not value.photo_paths:
-        raise ValueError("photo_paths must be a non-empty tuple")
-    if not all(isinstance(path, Path) for path in value.photo_paths):
-        raise TypeError("photo_paths must contain Path values")
+    if not isinstance(value.images, list) or not value.images:
+        raise ValueError("images must be a non-empty list")
+    if not all(isinstance(image, ImageData) for image in value.images):
+        raise TypeError("images must contain ImageData values")
     if not isinstance(value.sky, Sky):
         raise TypeError("sky must be a Sky")
-
-
-def _load_photo(path: Path, label: str) -> ImageData:
-    if not path.is_file():
-        raise FileNotFoundError(f"renderer input does not exist: {path}")
-
-    photo = Io.load_fits(path)
-    if photo.latitude_deg is None or photo.longitude_deg is None:
-        raise ValueError(f"{label} FITS metadata needs latitude and longitude")
-    return photo
-
 
 def _average_cameras(
     cameras: Sequence[Camera],
@@ -104,6 +93,8 @@ def _average_cameras(
                 camera.image_model.fwhm,
                 camera.image_model.sky_background,
                 camera.image_model.read_noise,
+                camera.image_model.impulsive_noise_probability,
+                camera.image_model.impulsive_noise_sigma,
             )
             for camera in cameras
         ],
@@ -112,7 +103,15 @@ def _average_cameras(
     if not np.isfinite(values).all():
         raise ValueError("cannot average non-finite camera parameters")
 
-    fov, flux, fwhm, sky_background, read_noise = np.mean(values, axis=0)
+    (
+        fov,
+        flux,
+        fwhm,
+        sky_background,
+        read_noise,
+        impulsive_noise_probability,
+        impulsive_noise_sigma,
+    ) = np.mean(values, axis=0)
     return Camera(
         geometry=CameraGeometry(
             fov=float(fov),
@@ -130,6 +129,8 @@ def _average_cameras(
             fwhm=float(fwhm),
             sky_background=float(sky_background),
             read_noise=float(read_noise),
+            impulsive_noise_probability=float(impulsive_noise_probability),
+            impulsive_noise_sigma=float(impulsive_noise_sigma),
         ),
     )
 
@@ -147,7 +148,7 @@ def _fit_photo(
     if first_fov is not None:
         # The photographs come from one fixed camera. Restricting only the
         # expensive rough search leaves every final fit independent.
-        tolerance = 2.0
+        tolerance = 5.0
         center = round(first_fov / tolerance) * tolerance
         calibration_options.update(
             rough_min_fov=max(0.1, center - tolerance),
@@ -231,12 +232,7 @@ def run(input: Input) -> Output:
     """Fit every photograph and compare it with the average camera model."""
 
     _validate_input(input)
-
-    records = tuple(
-        _load_photo(Path(path), f"Image {index}")
-        for index, path in enumerate(input.photo_paths, start=1)
-    )
-
+    records = input.images
     observers: list[Observer] = []
     fitted_cameras: list[Camera] = []
     reports: list[tuple[StepReport, ...]] = []

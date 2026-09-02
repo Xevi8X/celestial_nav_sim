@@ -5,25 +5,64 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import numpy as np
 import os
 from pathlib import Path
 import sys
 
-import numpy as np
+from common import ImageData
+from PIL import Image
+from zoneinfo import ZoneInfo
 
 
 LOGGER = logging.getLogger(__name__)
 
-
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _RESULTS_DIRECTORY = _REPOSITORY_ROOT / "results"
 _OUTPUT_CACHE = _RESULTS_DIRECTORY / "experiment_outputs.pkl"
-_PHOTO_PATHS = tuple(
-    _REPOSITORY_ROOT / ".data" / f"image{index}.fit"
-    for index in (1, 2, 3)
-)
 _RANDOM_SEED = 20260805
 _REPETITIONS = 1
+
+_SECRET_LOCATION = (0.0, 0.0, 0.0)
+
+_IMAGES = [
+    ImageData(
+        image=Image.open(_REPOSITORY_ROOT / ".data" / "20260829_221934.png"),
+        observation_time=dt.datetime(
+            2026, 8, 29, 22, 19, 34, tzinfo=ZoneInfo("Europe/Warsaw")
+        ),
+        exposure_s=0.2,
+        latitude_deg=_SECRET_LOCATION[0],
+        longitude_deg=_SECRET_LOCATION[1],
+        elevation_m=_SECRET_LOCATION[2],
+    ),
+    ImageData(
+        image=Image.open(_REPOSITORY_ROOT / ".data" / "20260829_222115.png"),
+        observation_time=dt.datetime(
+            2026, 8, 29, 22, 21, 15, tzinfo=ZoneInfo("Europe/Warsaw")
+        ),
+        exposure_s=0.2,
+        latitude_deg=_SECRET_LOCATION[0],
+        longitude_deg=_SECRET_LOCATION[1],
+        elevation_m=_SECRET_LOCATION[2],
+    ),
+    ImageData(
+        image=Image.open(_REPOSITORY_ROOT / ".data" / "20260829_222348.png"),
+        observation_time=dt.datetime(
+            2026, 8, 29, 22, 23, 48, tzinfo=ZoneInfo("Europe/Warsaw")
+        ),
+        exposure_s=0.2,
+        latitude_deg=_SECRET_LOCATION[0],
+        longitude_deg=_SECRET_LOCATION[1],
+        elevation_m=_SECRET_LOCATION[2],
+    )
+]
+
+_MARKED_IMAGES = [
+    Image.open(_REPOSITORY_ROOT / ".data" / "big_dipper_mark.jpg"),
+    Image.open(_REPOSITORY_ROOT / ".data" / "cassiopeia_mark.jpg"),
+    Image.open(_REPOSITORY_ROOT / ".data" / "lyra_mark.jpg"),
+]
 
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
@@ -89,7 +128,7 @@ def _run_experiments() -> dict[str, object]:
 
     LOGGER.info("Starting renderer tuning")
     renderer = renderer_tuning.run(renderer_tuning.Input(
-        photo_paths=_PHOTO_PATHS,
+        images=_IMAGES,
         sky=sky,
     ))
 
@@ -152,6 +191,8 @@ def _write_reports(outputs: dict[str, object]) -> tuple[Path, ...]:
         *report_renderer_tuning(
             outputs["renderer"],
             _RESULTS_DIRECTORY / "renderer_tuning",
+            tuple(("Big Dipper", "Cassiopeia", "Lyra, Hercules, and Draco (partially)")),
+            tuple(_MARKED_IMAGES),
         ),
         *report_accelerometer_calibration(
             outputs["accelerometer"],

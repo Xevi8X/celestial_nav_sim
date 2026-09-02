@@ -55,6 +55,35 @@ class AccelerometerParameters:
     def linear_matrix(self):
         return self.assembly_matrix @ np.diag(self.axis_scale)
 
+    @staticmethod
+    def average(parameters):
+        """Return the mean parameters, with rotation projected onto SO(3)."""
+
+        parameters = tuple(parameters)
+        if not parameters:
+            raise ValueError("parameters must contain at least one instance")
+        if not all(
+            isinstance(value, AccelerometerParameters) for value in parameters
+        ):
+            raise TypeError("parameters must contain AccelerometerParameters instances")
+
+        matrices = np.stack([value.assembly_matrix for value in parameters])
+        mean_matrix = np.mean(matrices, axis=0)
+        left, _, right_transpose = np.linalg.svd(mean_matrix)
+        assembly_matrix = left @ np.diag(
+            [1.0, 1.0, np.linalg.det(left @ right_transpose)]
+        ) @ right_transpose
+        return AccelerometerParameters(
+            assembly_matrix=assembly_matrix,
+            axis_scale=np.mean(
+                [value.axis_scale for value in parameters], axis=0
+            ),
+            bias=np.mean([value.bias for value in parameters], axis=0),
+            noise_stddev=np.mean(
+                [value.noise_stddev for value in parameters], axis=0
+            ),
+        )
+
     def apply(self, reference):
         return self.linear_matrix @ (np.asarray(reference) + self.bias)
 

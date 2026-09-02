@@ -524,6 +524,63 @@ class CalibrationVisualizationTests(unittest.TestCase):
 
 
 class SkyNoiseStepTests(unittest.TestCase):
+    def test_sky_noise_uses_only_core_samples_and_fits_tail(self):
+        data = np.full((64, 64), 20.0)
+        data[20, 20] = 100.0
+        data[21, 21] = 200.0
+        image = Image.fromarray(data.astype(np.uint8))
+        config = CalibrationConfig(sky_tile_size=16)
+        context = CalibrationContext(
+            sky=empty_sky(), image=image, time=UTC_TIME,
+            latitude_deg=0.0, longitude_deg=0.0, elevation_m=0.0,
+            config=config, image_data=data, native_data=data,
+            saturated_mask=np.zeros(data.shape, dtype=bool),
+        )
+        observer = Observer()
+        observer.set_time(UTC_TIME + datetime.timedelta(seconds=1))
+        observer.set_location(0.0, 0.0)
+        observer.set_look_direction(
+            look_dir=[0.0, 0.0, -1.0], look_up=[1.0, 0.0, 0.0],
+        )
+        camera = Camera(
+            geometry=CameraGeometry(
+                fov=30.0, width=64, height=64,
+                image_format=ImageFormat.MONO8,
+            ),
+            image_model=CameraImageModel(exposure_time=1.0, fwhm=3.0),
+        )
+        calibrator = Calibrator(context.sky, config=config)
+        calibrator._all_source_mask = lambda data, valid, fwhm, config: (
+            np.zeros_like(data, dtype=bool)
+        )
+        captured = {}
+
+        def estimate_read_noise(residual, mean_output, camera, config):
+            captured["residual"] = residual.copy()
+            return 0.0, True
+
+        calibrator._estimate_read_noise = estimate_read_noise
+        calibrator.steps[-1].bind(context)(observer, camera)
+
+        self.assertTrue(np.all(np.abs(captured["residual"]) <= 5))
+        core_count = captured["residual"].size
+        self.assertAlmostEqual(
+            camera.image_model.impulsive_noise_probability,
+            2 / (core_count + 2),
+        )
+        self.assertAlmostEqual(
+            camera.image_model.impulsive_noise_sigma,
+            1.4826 * 50.0,
+        )
+        self.assertEqual(
+            context._pending_values["impulsive_noise_probability"],
+            camera.image_model.impulsive_noise_probability,
+        )
+        self.assertEqual(
+            context._pending_values["impulsive_noise_sigma"],
+            camera.image_model.impulsive_noise_sigma,
+        )
+
     def test_blank_sky_step_sets_camera_noise_and_reports_identifiability(self):
         rng = np.random.default_rng(123)
         data = rng.poisson(20.0, size=(64, 64)).astype(np.uint8)

@@ -32,8 +32,6 @@ LOGGER = logging.getLogger(__name__)
 
 
 _INITIAL_AZIMUTHS_DEG = (0.0, 90.0, 180.0, 270.0)
-# Use one explicitly chosen run as the calibration passed to later experiments.
-_HANDOFF_AZIMUTH_DEG = 0.0
 _PATTERN_PERIOD_S = 10.0
 _AZIMUTH_AMPLITUDE_DEG = 15.0
 _ELEVATION_CENTER_DEG = 50.0
@@ -277,6 +275,7 @@ def run(input: Input) -> Output:
 
     for repetition in range(input.repetitions):
         for location in input.locations:
+            estimates = []
             for initial_azimuth in _INITIAL_AZIMUTHS_DEG:
                 LOGGER.info(
                     "Accelerometer calibration: %s, repetition %d/%d, "
@@ -469,12 +468,13 @@ def run(input: Input) -> Output:
                     ),
                 })
 
-                if (
-                    initial_azimuth == _HANDOFF_AZIMUTH_DEG
-                    and initialized
-                    and calibration.converged
-                ):
-                    models[(location.name, repetition)] = estimate
+                if initialized and calibration.converged:
+                    estimates.append(estimate)
+
+            if estimates:
+                models[(location.name, repetition)] = (
+                    AccelerometerParameters.average(estimates)
+                )
 
     convergence_location = next(
         (

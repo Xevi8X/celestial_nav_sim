@@ -74,18 +74,16 @@ class LostInSpace:
     def solve(
         self,
         image: Image.Image,
-        distortion=(-0.1, 0.1),
-        pattern_checking_stars: Optional[int] = None,
+        distortion=(-0.5, 0.5),
+        pattern_checking_stars = 12,
     ) -> Optional[Solution]:
+        _validate_pattern_checking_stars(pattern_checking_stars)
         solve_options = {
             "distortion": distortion,
+            "pattern_checking_stars": pattern_checking_stars,
             "return_matches": True,
             "return_visual": True,
         }
-        if pattern_checking_stars is not None:
-            solve_options["pattern_checking_stars"] = (
-                _validate_pattern_checking_stars(pattern_checking_stars)
-            )
         res = self._t3.solve_from_image(image, **solve_options)
 
         if (

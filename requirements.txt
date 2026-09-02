@@ -2,9 +2,11 @@ astropy
 geographiclib
 matplotlib
 numpy<2
+opencv-python-headless
 pandas
 Pillow
 pygeomag==1.1.0
+pyqt5
 scipy
 skyfield
 git+https://github.com/esa/tetra3.git

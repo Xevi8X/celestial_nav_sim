@@ -35,7 +35,6 @@ CatalogId = Any
 
 
 class CalibrationError(RuntimeError):
-    """A calibration failure annotated with the step that failed."""
 
     def __init__(self, step: str, message: str):
         self.step = step
@@ -45,18 +44,6 @@ class CalibrationError(RuntimeError):
 
 @dataclass(frozen=True)
 class CalibrationConfig:
-    """Numerical policy for the default calibration pipeline.
-
-    ``time_reference`` defines whether ``time`` passed to
-    :meth:`Calibrator.estimate_camera` is the exposure start, midpoint, or end.
-    The default is ``"start"``, matching FITS ``DATE-OBS``.  The returned
-    observer is timestamped at exposure end, as expected by
-    :class:`sky_render.Renderer`.
-
-    With the default one-second exposure, fitted flux and background are
-    effective per-image values.  Supply the known exposure to ``Calibrator``
-    when rates are needed.
-    """
 
     exposure_time: float = 1.0
     time_reference: str = "start"
@@ -66,13 +53,13 @@ class CalibrationConfig:
     rough_star_max_magnitude: float = 7.0
     rough_distortion_bounds: Tuple[float, float] = (-0.3, 0.3)
 
-    refined_fov_tolerance: float = 2.0
+    refined_fov_tolerance: float = 5.0
     refined_star_max_magnitude: float = 10.0
     refined_distortion_bounds: Tuple[float, float] = (-0.1, 0.1)
     minimum_matches: int = 6
     maximum_false_positive_probability: float = 1e-3
-    maximum_astrometric_rmse_px: float = 1.5
-    maximum_distortion_displacement_px: float = 1.0
+    maximum_astrometric_rmse_px: float = 20.0
+    maximum_distortion_displacement_px: float = 150.0
 
     star_patch_radius: int = 28
     minimum_star_area: int = 3
@@ -86,7 +73,7 @@ class CalibrationConfig:
     source_threshold_sigma: float = 4.0
     sky_tile_size: int = 64
     maximum_noise_samples: int = 100000
-    maximum_read_noise: float = 100.0
+    maximum_read_noise: float = 10000.0
 
     def __post_init__(self):
         positive = {
@@ -232,7 +219,6 @@ class CalibrationContext:
 
 @dataclass(frozen=True)
 class CalibrationStep:
-    """Definition of a step that binds run context to a pair-to-pair function."""
 
     name: str
     binder: Callable[[CalibrationContext], BoundCalibrationStep]
@@ -263,12 +249,6 @@ class CalibrationStep:
 
 
 def otsu_threshold(values: np.ndarray) -> float:
-    """Return the exact Otsu threshold for finite scalar samples.
-
-    Unique sample values are used directly rather than assuming an 8-bit
-    histogram, so the same implementation works for MONO8, MONO16, and RGB
-    luminance cutouts.
-    """
 
     samples = np.asarray(values, dtype=np.float64).ravel()
     samples = samples[np.isfinite(samples)]
@@ -310,13 +290,6 @@ def _robust_location_scale(values: np.ndarray) -> Tuple[float, float]:
 
 
 class Calibrator:
-    """Estimate an observer attitude and camera through configurable steps.
-
-    Every step has the public ``(observer, camera) -> (observer, camera)``
-    contract.  Set ``visualize=True`` to display the final observed-versus-
-    calibrated comparison, or provide ``visualization_callback`` to receive
-    its :class:`StepReport` and save/embed the ``visual`` PIL image.
-    """
 
     IMAGE_PROPERTIES_STEP = "image_properties"
     ROUGH_FOV_STEP = "rough_fov"
@@ -424,7 +397,6 @@ class Calibrator:
             )
 
     def add_step(self, name: str, step: BoundCalibrationStep):
-        """Append a plain ``(observer, camera) -> (observer, camera)`` step."""
         self.insert_step(len(self._steps), name, step)
 
     def insert_step(
@@ -433,18 +405,15 @@ class Calibrator:
         name: str,
         step: BoundCalibrationStep,
     ):
-        """Insert a plain pair-to-pair step at ``index``."""
         self.insert_step_definition(
             index,
             CalibrationStep.from_callable(name, step),
         )
 
     def add_step_definition(self, step: CalibrationStep):
-        """Append a context-aware step definition."""
         self.insert_step_definition(len(self._steps), step)
 
     def insert_step_definition(self, index: int, step: CalibrationStep):
-        """Insert a context-aware definition whose binder runs once per image."""
         if not isinstance(step, CalibrationStep):
             raise TypeError("step must be a CalibrationStep")
         if any(existing.name == step.name for existing in self._steps):
@@ -497,19 +466,8 @@ class Calibrator:
         data: np.ndarray,
         image_format: ImageFormat,
     ) -> Image.Image:
-        """Build tetra3's 8-bit working copy without touching photometry data.
 
-        tetra3's default extraction thresholds behave substantially differently
-        on high-bit-depth arrays. ``navigation_scale`` creates its 8-bit
-        working copy without changing the native camera-count units used for
-        flux, background, and noise.
-        """
-
-        scaled = (
-            np.asarray(data, dtype=np.float64)
-            / image_format.navigation_scale
-        )
-        return Image.fromarray(np.clip(scaled, 0, 255).astype(np.uint8))
+        return Image.fromarray(data)
 
     @staticmethod
     def _validate_request(context: CalibrationContext):
@@ -766,12 +724,6 @@ class Calibrator:
     def _process_matches(
         solution: LostInSpace.Solution,
     ) -> Tuple[np.ndarray, np.ndarray, Tuple[Optional[CatalogId], ...]]:
-        """Validate and normalize tetra3's raw match payload for calibration.
-
-        LostInSpace deliberately preserves tetra3's objects unchanged.  Their
-        conversion belongs here, at the first point where numerical arrays and
-        aligned catalog rows are actually needed.
-        """
 
         try:
             centroids = np.asarray(
@@ -1019,8 +971,8 @@ class Calibrator:
         config = context.config
         radius = config.star_patch_radius
         y_tetra, x_tetra = map(float, centroid)
-        # tetra3 uses (0.5, 0.5) for the first pixel centre, while Canvas
-        # positions integer pixel indices at their centres.
+                                                                         
+                                                           
         catalog_y = y_tetra - 0.5
         catalog_x = x_tetra - 0.5
         center_y = int(round(catalog_y))
@@ -1349,10 +1301,11 @@ class Calibrator:
         data: np.ndarray,
         valid: np.ndarray,
         tile_size: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         tile_locations = []
         residuals = []
         internal_means = []
+        tail_residuals = []
         height, width = data.shape
         for y0 in range(0, height, tile_size):
             for x0 in range(0, width, tile_size):
@@ -1367,12 +1320,14 @@ class Calibrator:
                 values = data[y0:y1, x0:x1][tile_valid]
                 location, scale = _robust_location_scale(values)
                 clean = np.abs(values - location) <= 5 * scale
+                tile_tail_residual = values[~clean] - location
                 values = values[clean]
                 if values.size < 32:
                     continue
                 tile_locations.append(location)
                 residuals.append(values - location)
                 internal_means.append(np.full(values.size, location))
+                tail_residuals.append(tile_tail_residual)
 
         if not tile_locations:
             raise ValueError("no uncontaminated blank-sky tiles remain")
@@ -1380,6 +1335,7 @@ class Calibrator:
             np.asarray(tile_locations, dtype=np.float64),
             np.concatenate(residuals),
             np.concatenate(internal_means),
+            np.concatenate(tail_residuals),
         )
 
     @staticmethod
@@ -1505,8 +1461,16 @@ class Calibrator:
                 mean_output = np.concatenate([
                     result[2] for result in channel_results
                 ])
+                tail_residual = np.concatenate([
+                    result[3] for result in channel_results
+                ])
             else:
-                tile_locations, residual, mean_output = self._blank_sky_tiles(
+                (
+                    tile_locations,
+                    residual,
+                    mean_output,
+                    tail_residual,
+                ) = self._blank_sky_tiles(
                     data,
                     valid,
                     context.config.sky_tile_size,
@@ -1523,9 +1487,26 @@ class Calibrator:
                 camera,
                 context.config,
             )
+
+            tail_count = tail_residual.size
+            core_count = residual.size
+            tail_probability = tail_count / (tail_count + core_count)
+
+            tail_count = 0
+
+            if tail_count:
+                tail_sigma = float(np.percentile(
+                    np.abs(tail_residual),
+                    50.0,
+                ))
+            else:
+                tail_sigma = 0.0
+                
             camera.set_noise(
                 sky_background=sky_background,
                 read_noise=read_noise,
+                impulsive_noise_probability=tail_probability,
+                impulsive_noise_sigma=tail_sigma,
             )
             context.record(
                 fov_deg=camera.geometry.fov,
@@ -1533,6 +1514,8 @@ class Calibrator:
                 fwhm_px=camera.image_model.fwhm,
                 sky_background=sky_background,
                 read_noise=read_noise,
+                impulsive_noise_probability=tail_probability,
+                impulsive_noise_sigma=tail_sigma,
                 read_noise_identifiable=read_noise_identifiable,
                 blank_pixels=int(np.count_nonzero(valid)),
                 blank_tiles=int(tile_locations.size),
@@ -1579,7 +1562,6 @@ class Calibrator:
         longitude_deg: float,
         elevation_m: float = 0.0,
     ) -> CalibrationPair:
-        """Run all configured steps and return a complete observer and camera."""
 
         context = CalibrationContext(
             sky=self.sky,

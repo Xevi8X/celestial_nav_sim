@@ -55,7 +55,12 @@ class CameraLifecycleTests(unittest.TestCase):
 
         camera.set_exposure_time(0.25)
         camera.set_photometry(flux=1234.0, fwhm=2.5)
-        camera.set_noise(sky_background=8.0, read_noise=0.75)
+        camera.set_noise(
+            sky_background=8.0,
+            read_noise=0.75,
+            impulsive_noise_probability=0.02,
+            impulsive_noise_sigma=12.0,
+        )
 
         self.assertEqual(
             camera.image_model,
@@ -65,6 +70,8 @@ class CameraLifecycleTests(unittest.TestCase):
                 fwhm=2.5,
                 sky_background=8.0,
                 read_noise=0.75,
+                impulsive_noise_probability=0.02,
+                impulsive_noise_sigma=12.0,
             ),
         )
 
@@ -92,6 +99,14 @@ class CameraLifecycleTests(unittest.TestCase):
 
         camera.geometry.image_format = ImageFormat.MONO8
         camera.image_model.read_noise = -1.0
+        self.assertFalse(camera.is_valid())
+
+        camera.image_model.read_noise = 1.0
+        camera.image_model.impulsive_noise_probability = -0.1
+        self.assertFalse(camera.is_valid())
+
+        camera.image_model.impulsive_noise_probability = 0.1
+        camera.image_model.impulsive_noise_sigma = -1.0
         self.assertFalse(camera.is_valid())
 
     def test_derived_geometry_rejects_invalid_camera(self):

@@ -58,6 +58,8 @@ class CameraImageModel:
     fwhm: float = 3.0
     sky_background: float = 3.0
     read_noise: float = 1.0
+    impulsive_noise_probability: float = 0.0
+    impulsive_noise_sigma: float = 0.0
 
 
 @dataclass
@@ -90,12 +92,16 @@ class Camera:
                     image_model.fwhm,
                     image_model.sky_background,
                     image_model.read_noise,
+                    image_model.impulsive_noise_probability,
+                    image_model.impulsive_noise_sigma,
                 )).all()
                 and image_model.exposure_time > 0
                 and image_model.flux > 0
                 and image_model.fwhm > 0
                 and image_model.sky_background >= 0
                 and image_model.read_noise >= 0
+                and image_model.impulsive_noise_probability >= 0
+                and image_model.impulsive_noise_sigma >= 0
             )
         except (AttributeError, TypeError, ValueError):
             return False
@@ -124,9 +130,15 @@ class Camera:
         self,
         sky_background: float,
         read_noise: float,
+        impulsive_noise_probability: float = 0.0,
+        impulsive_noise_sigma: float = 0.0,
     ) -> None:
         self.image_model.sky_background = sky_background
         self.image_model.read_noise = read_noise
+        self.image_model.impulsive_noise_probability = (
+            impulsive_noise_probability
+        )
+        self.image_model.impulsive_noise_sigma = impulsive_noise_sigma
 
     @property
     def focal_length(self) -> float:

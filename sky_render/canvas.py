@@ -1,3 +1,4 @@
+from cv2.gapi import mask
 import numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter
@@ -183,6 +184,20 @@ class Canvas:
                 read_noise,
                 self._image.shape,
             ).astype(np.float32)
+        impulsive_probability = (
+            self._camera.image_model.impulsive_noise_probability
+        )
+        impulsive_sigma = self._camera.image_model.impulsive_noise_sigma
+        if impulsive_probability > 0.0 and impulsive_sigma > 0.0:
+            mask = rng.random(self._image.shape) < impulsive_probability
+            count = np.count_nonzero(mask)
+            if count:
+                sign = np.where(
+                    rng.random(count) < 0.5,
+                    -1.0,
+                    1.0,
+                )
+                self._image[mask] += sign * impulsive_sigma
 
     def image(self):
         image_format = self._camera.geometry.image_format

@@ -79,6 +79,47 @@ def make_finalized_canvas(image_format, seed=123):
 
 
 class ImageFormatTests(unittest.TestCase):
+    def test_zero_impulsive_noise_does_not_change_noise_output(self):
+        reference = make_camera(ImageFormat.MONO8)
+        explicit_zero = make_camera(ImageFormat.MONO8)
+        explicit_zero.set_noise(
+            sky_background=12.0,
+            read_noise=1.0,
+            impulsive_noise_probability=0.0,
+            impulsive_noise_sigma=0.0,
+        )
+
+        reference_canvas = Canvas(reference)
+        zero_canvas = Canvas(explicit_zero)
+        reference_canvas.add_horizon(SKY_MATRIX)
+        zero_canvas.add_horizon(SKY_MATRIX)
+        reference_canvas.add_noise(seed=42)
+        zero_canvas.add_noise(seed=42)
+
+        np.testing.assert_array_equal(
+            reference_canvas.linear_image(),
+            zero_canvas.linear_image(),
+        )
+
+    def test_impulsive_noise_is_sparse_and_seeded(self):
+        camera = make_camera(ImageFormat.MONO8)
+        camera.set_noise(
+            sky_background=0.0,
+            read_noise=0.0,
+            impulsive_noise_probability=0.1,
+            impulsive_noise_sigma=10.0,
+        )
+        first = Canvas(camera)
+        second = Canvas(camera)
+        first.add_noise(seed=91)
+        second.add_noise(seed=91)
+
+        first_image = first.linear_image()
+        np.testing.assert_array_equal(first_image, second.linear_image())
+        changed = np.count_nonzero(first_image)
+        self.assertGreater(changed, 0)
+        self.assertLess(changed, first_image.size)
+
     def test_properties(self):
         expected = {
             ImageFormat.MONO8: (1, np.uint8, 255, 1.0, 1.0, True),
@@ -126,6 +167,8 @@ class ImageFormatTests(unittest.TestCase):
                 "fwhm",
                 "sky_background",
                 "read_noise",
+                "impulsive_noise_probability",
+                "impulsive_noise_sigma",
             ],
         )
 

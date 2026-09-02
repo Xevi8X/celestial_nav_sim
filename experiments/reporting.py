@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from matplotlib.figure import Figure
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 if TYPE_CHECKING:
@@ -732,8 +732,8 @@ def plot_position_results(
     _require_fields(rows, (location_field, individual_field, sequence_field))
     locations = _ordered_unique(row[location_field] for row in rows)
     x_values = np.arange(len(locations), dtype=float)
-    figure = Figure(figsize=(7.2, 3.2), constrained_layout=True)
-    axes = np.asarray(figure.subplots(1, 2, squeeze=False))[0]
+    figure = Figure(figsize=(3.5, 6.2), constrained_layout=True)
+    axes = np.asarray(figure.subplots(2, 1, squeeze=False))[:, 0]
     for axis, field, title in (
         (axes[0], individual_field, "Mean individual-image error"),
         (axes[1], sequence_field, "Combined accepted-sample error"),
@@ -780,23 +780,25 @@ def _luminance(image: Image.Image) -> np.ndarray:
     return data
 
 
-def _preview_pair(real: Image.Image, rendered: Image.Image) -> tuple[Image.Image, Image.Image]:
-    arrays = (_luminance(real), _luminance(rendered))
-    finite_parts = [array[np.isfinite(array)] for array in arrays]
-    finite = np.concatenate([part for part in finite_parts if part.size])
-    if finite.size:
-        low, high = np.percentile(finite, (1.0, 99.5))
-        if not high > low:
-            low, high = float(np.min(finite)), float(np.max(finite))
-    else:
-        low, high = 0.0, 1.0
-    if not high > low:
-        high = low + 1.0
+def _preview_pair(real, rendered):
     previews = []
-    for array in arrays:
-        normalized = np.nan_to_num((array - low) / (high - low), nan=0.0)
-        output = np.asarray(np.sqrt(np.clip(normalized, 0.0, 1.0)) * 255, dtype=np.uint8)
+
+    for image in (real, rendered):
+        data = _luminance(np.asarray(image)).astype(np.float32)
+        lo, hi = np.percentile(data, [0.1, 99.9])
+
+        if hi <= lo:
+            hi = lo + 1.0
+
+        normalized = np.clip(
+            (data - lo) * 65535.0 / (hi - lo),
+            0,
+            65535,
+        ).astype(np.uint16)
+
+        output = (normalized >> 8).astype(np.uint8)
         previews.append(Image.fromarray(output).convert("RGB"))
+
     return previews[0], previews[1]
 
 
@@ -808,9 +810,10 @@ def write_renderer_montage(
     image_field: str = "image_id",
     real_field: str = "real_image",
     rendered_field: str = "rendered_image",
-    panel_width: int = 640,
+    panel_width: int = 507,
     real_label: str = "Real",
     rendered_label: str = "Rendered",
+    marked_label: str = "Threshold and constellations",
     label_font_size: int | None = None,
 ) -> tuple[Path, Path | None]:
     """Create a raster real/rendered montage and, optionally, an EPS wrapper.
@@ -827,21 +830,26 @@ def write_renderer_montage(
     if label_font_size is not None and label_font_size < 1:
         raise ValueError("label_font_size must be positive")
     _require_fields(rows, (image_field, real_field, rendered_field))
-    prepared: list[tuple[str, Image.Image, Image.Image]] = []
+    prepared: list[tuple[str, Image.Image, Image.Image, Image.Image]] = []
     max_height = 1
     for row in rows:
         real, rendered = _preview_pair(
             _load_image(row[real_field]),
             _load_image(row[rendered_field]),
         )
+        marked = ImageOps.expand(_load_image(row["marked_image"]), border=4, fill="black")
+
+        
+
         resized = []
-        for image in (real, rendered):
+        for image in (real, rendered, marked):
             height = max(1, round(image.height * panel_width / image.width))
-            resized.append(
-                image.resize((panel_width, height), Image.Resampling.LANCZOS)
+            resized_image = image.resize(
+                (panel_width, height), Image.Resampling.LANCZOS
             )
+            resized.append(resized_image)
             max_height = max(max_height, height)
-        prepared.append((str(row[image_field]), resized[0], resized[1]))
+        prepared.append((str(row[image_field]), resized[0], resized[1], resized[2]))
 
     margin = 12
     font_size = (
@@ -855,15 +863,15 @@ def write_renderer_montage(
         left, top, right, bottom = font.getbbox(label)
         return right - left, bottom - top
 
-    image_labels = [image_id for image_id, _, _ in prepared]
-    source_labels = (real_label, rendered_label)
+    image_labels = [image_id for image_id, _, _, _ in prepared]
+    source_labels = (real_label, rendered_label, marked_label)
     header_height = max(
         34,
         max(label_extent(label)[1] for label in image_labels) + 2 * margin,
     )
     row_label_width = max(
         100,
-        max(label_extent(label)[0] for label in source_labels) + 2 * margin,
+        max(label_extent(label)[1] for label in source_labels) + 2 * margin,
     )
     row_height = max_height + margin
     width = (
@@ -875,16 +883,47 @@ def write_renderer_montage(
     montage = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(montage)
 
-    def draw_centered_label(label: str, center_x: int, center_y: int) -> None:
+    def draw_centered_label(label: str, center_x: int, center_y: int, angle: int = 0) -> None:
         left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
-        draw.text(
-            (
-                round(center_x - (left + right) / 2),
-                round(center_y - (top + bottom) / 2),
-            ),
+
+        if angle == 0:
+            draw.text(
+                (
+                    round(center_x - (left + right) / 2),
+                    round(center_y - (top + bottom) / 2),
+                ),
+                label,
+                fill="black",
+                font=font,
+            )
+            return
+
+        text_width = right - left
+        text_height = bottom - top
+
+        text_image = Image.new(
+            "RGBA",
+            (text_width + 20, text_height + 20),
+            (255, 255, 255, 0),
+        )
+
+        text_draw = ImageDraw.Draw(text_image)
+        text_draw.text(
+            (10 - left, 10 - top),
             label,
             fill="black",
             font=font,
+        )
+
+        text_image = text_image.rotate(angle, expand=True)
+
+        montage.paste(
+            text_image,
+            (
+                round(center_x - text_image.width / 2),
+                round(center_y - text_image.height / 2),
+            ),
+            text_image,
         )
 
     for column, image_id in enumerate(image_labels):
@@ -901,24 +940,25 @@ def write_renderer_montage(
             source_label,
             row_label_width // 2,
             y + max_height // 2,
+            angle=90,
         )
-        for column, (_, real, rendered) in enumerate(prepared):
-            image = (real, rendered)[row_index]
+        for column, (_, real, rendered, marked) in enumerate(prepared):
+            image = (real, rendered, marked)[row_index]
             x = row_label_width + margin * (column + 1) + panel_width * column
             image_y = y + (max_height - image.height) // 2
             montage.paste(image, (x, image_y))
 
-    for column in range(len(prepared) - 1):
-        separator_x = (
-            row_label_width
-            + (column + 1) * panel_width
-            + (column + 1) * margin
-            + margin // 2
-        )
-        draw.line(
-            (separator_x, margin, separator_x, height - margin),
-            fill=(204, 204, 204),
-        )
+    # for column in range(len(prepared) - 1):
+    #     separator_x = (
+    #         row_label_width
+    #         + (column + 1) * panel_width
+    #         + (column + 1) * margin
+    #         + margin // 2
+    #     )
+    #     draw.line(
+    #         (separator_x, margin, separator_x, height - margin),
+    #         fill=(204, 204, 204),
+    #     )
 
     png_destination = Path(png_path)
     png_destination.parent.mkdir(parents=True, exist_ok=True)
@@ -938,6 +978,12 @@ def _camera_parameters(camera: Any) -> Mapping[str, float]:
         "point_spread_fwhm_px": float(camera.image_model.fwhm),
         "background_counts_per_s": float(camera.image_model.sky_background),
         "read_noise_counts": float(camera.image_model.read_noise),
+        "impulsive_noise_probability": float(
+            camera.image_model.impulsive_noise_probability
+        ),
+        "impulsive_noise_sigma_counts": float(
+            camera.image_model.impulsive_noise_sigma
+        ),
     }
 
 
@@ -954,6 +1000,16 @@ def _renderer_parameter_table(
         ("Point-spread width", "point_spread_fwhm_px", "px FWHM"),
         ("Background", "background_counts_per_s", "counts s^-1"),
         ("Read noise", "read_noise_counts", "counts RMS"),
+        (
+            "Impulsive-noise probability",
+            "impulsive_noise_probability",
+            "per pixel",
+        ),
+        (
+            "Impulsive-noise scale",
+            "impulsive_noise_sigma_counts",
+            "counts RMS",
+        ),
     )
     fitted = tuple(_camera_parameters(camera) for camera in output.fitted_cameras)
     average = _camera_parameters(output.camera)
@@ -986,6 +1042,8 @@ def _validate_renderer_output(output: "RendererTuningOutput") -> int:
 def report_renderer_tuning(
     output: "RendererTuningOutput",
     output_directory: str | Path,
+    custom_names: tuple[str, ...],
+    marked_photos: tuple[Image.Image, ...],
 ) -> tuple[Path, ...]:
     """Write renderer-tuning tables, comparisons, and histogram artifacts."""
 
@@ -1002,13 +1060,13 @@ def report_renderer_tuning(
     )
     montage_rows = (
         {
-            "image_id": f"Image {index}",
+            "image_id": name,
             "real_image": real,
             "rendered_image": rendered,
+            "marked_image": marked,
         }
-        for index, (real, rendered) in enumerate(
-            zip(output.photos, output.rendered_photos),
-            start=1,
+        for (name, real, rendered, marked) in zip(
+            custom_names, output.photos, output.rendered_photos, marked_photos
         )
     )
     montage_png, montage_eps = write_renderer_montage(

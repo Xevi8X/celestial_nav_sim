@@ -376,6 +376,7 @@ def _direction_label(azimuth_deg: Any) -> str:
 def plot_renderer_histograms(
     records: Iterable[Mapping[str, Any]],
     path: str | Path,
+    custom_names: tuple[str, ...],
     *,
     image_field: str = "image_id",
     series_field: str = "source",
@@ -394,18 +395,18 @@ def plot_renderer_histograms(
     image_ids = _ordered_unique(row[image_field] for row in rows)
     series = _ordered_unique(row[series_field] for row in rows)
     figure = Figure(
-        figsize=(3.5, max(2.8, 2.2 * len(image_ids))),
+        figsize=(9.0, 2.8),
         constrained_layout=True,
     )
     axes = np.asarray(
         figure.subplots(
-            len(image_ids),
             1,
+            len(image_ids),
             squeeze=False,
             sharey=True,
         )
-    )[:, 0]
-    for axis, image_id in zip(axes, image_ids):
+    )[0, :]
+    for axis, image_id, custom_name in zip(axes, image_ids, custom_names):
         for series_index, series_name in enumerate(series):
             selected = [
                 row
@@ -424,7 +425,7 @@ def plot_renderer_histograms(
                         series_index % len(_LINE_STYLES)
                     ],
                 )
-        axis.set_title(str(image_id))
+        axis.set_title(str(custom_name))
         axis.set_xlabel("Pixel intensity")
         _add_grid(axis)
     figure.supylabel("Pixel fraction")
@@ -594,7 +595,11 @@ def plot_magnetometer_results(
     vector_error_field: str = "vector_error_ut",
     heading_error_field: str = "heading_error_deg",
 ) -> Path:
-    """Plot mean heading errors by location and calibration procedure."""
+    """Plot mean heading errors, capping the displayed range at 2 degrees.
+
+    Values above the cap retain their numeric value in an annotation so that
+    the uncalibrated result does not obscure the calibrated procedures.
+    """
 
     rows = _materialize_records(records)
     if not rows:
@@ -616,6 +621,7 @@ def plot_magnetometer_results(
     axis = figure.subplots()
     x_values = np.arange(len(locations), dtype=float)
     width = 0.8 / max(1, len(procedures))
+    maximum_display_error = 0.5
     for index, procedure in enumerate(procedures):
         values = []
         for location in locations:
@@ -627,16 +633,35 @@ def plot_magnetometer_results(
             ]
             values.append(_mean(selected, heading_error_field))
         offsets = x_values - 0.4 + width / 2 + index * width
+        displayed_values = [
+            min(value, maximum_display_error)
+            if math.isfinite(value)
+            else value
+            for value in values
+        ]
         axis.bar(
             offsets,
-            values,
+            displayed_values,
             width=width,
             label=_magnetometer_procedure_label(procedure),
             hatch=_HATCHES[index % len(_HATCHES)],
             edgecolor="black",
             linewidth=0.8,
         )
+        for offset, value in zip(offsets, values):
+            if math.isfinite(value) and value > maximum_display_error:
+                axis.annotate(
+                    f"↑ {value:.2f}°",
+                    xy=(offset, maximum_display_error),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=10,
+                    annotation_clip=False,
+                )
     axis.set_ylabel("Mean heading error (deg)")
+    axis.set_ylim(0, maximum_display_error)
     axis.set_xticks(x_values, [str(location) for location in locations])
     axis.tick_params(axis="x", labelrotation=20, labelsize=8)
     _add_grid(axis)
@@ -1080,6 +1105,7 @@ def report_renderer_tuning(
     histogram_eps = plot_renderer_histograms(
         output.histograms,
         destination / ARTIFACT_FILENAMES["renderer_histogram_comparison"],
+        custom_names
     )
     histogram_csv = write_records_csv(
         destination / "raw" / "renderer_histograms.csv",
